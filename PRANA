@@ -1633,3 +1633,515 @@ verifyTransaction pk SignedTransaction{..} =
 
 
 
+
+
+9 1 CHAT KRILNO IMPLEMENT
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+module Main where
+
+import Cardano.Api
+import Cardano.Api.Shelley
+import Cardano.Crypto.Hash.Class (hashToBytes)
+import Cardano.Ledger.Credential
+import Cardano.Ledger.Crypto (StandardCrypto)
+import Cardano.Ledger.Keys (hashKey)
+import qualified Data.ByteString.Char8 as BS
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+import System.Environment (getArgs)
+import Control.Monad (when)
+import Data.Aeson (FromJSON, ToJSON, encode, decode)
+import GHC.Generics (Generic)
+import Database.Persist.Sqlite
+import Database.Persist.TH
+import Control.Monad.Logger (runStdoutLoggingT)
+import System.Metrics
+import qualified System.Metrics.Distribution as Distribution
+import qualified System.Remote.Monitoring as EKG
+import System.IO.Unsafe (unsafePerformIO)
+
+-- Define your data structures
+share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
+Config
+    networkId NetworkId
+    socketPath FilePath
+    walletId Text
+    stakingCredential StakeCredential
+    deriving Show Generic
+
+Transaction
+    txId Text
+    inputs [TxIn]
+    outputs [TxOut CtxTx]
+    metadata (Maybe (TxMetadata))
+    deriving Show Generic
+
+Block
+    slotNo SlotNo
+    blockNo BlockNo
+    headerHash (Hash BlockHeader)
+    transactions [Transaction]
+    deriving Show Generic
+|]
+
+-- Instances for JSON serialization
+instance FromJSON Config
+instance ToJSON Config
+instance FromJSON Transaction
+instance ToJSON Transaction
+instance FromJSON Block
+instance ToJSON Block
+
+-- Metrics
+metrics :: Store
+metrics = unsafePerformIO $ newStore
+
+blockTimeDistribution :: Distribution.Distribution
+blockTimeDistribution = unsafePerformIO $ do
+    dist <- Distribution.new
+    registerDistribution "block_time" dist metrics
+    return dist
+
+-- Main function
+main :: IO ()
+main = do
+    args <- getArgs
+    let configFile = if null args then "config.json" else head args
+    config <- loadConfig configFile
+
+    runStdoutLoggingT $ withSqlitePool "cardano.db" 10 $ \pool -> do
+        runSqlPool (runMigration migrateAll) pool
+
+        -- Print the loaded configuration
+        putStrLn "Loaded configuration:"
+        print config
+
+        -- Example of creating a transaction
+        tx <- createTransaction config ["input1", "input2"] ["output1"] (Just "metadata")
+        submitTransaction config tx
+
+        -- Querying the chain tip
+        block <- queryChainTip config
+        print block
+
+        -- Start block production (Placeholder)
+        startBlockProduction config
+
+        -- Start monitoring server
+        startEKGServer
+
+-- Load configuration
+loadConfig :: FilePath -> IO Config
+loadConfig path = do
+    contents <- BS.readFile path
+    case decode contents of
+        Just config -> return config
+        Nothing -> error "Failed to parse configuration file"
+
+-- Function to create a transaction
+createTransaction :: Config -> [TxIn] -> [TxOut CtxTx] -> Maybe TxMetadata -> IO (Tx CtxTx)
+createTransaction Config{..} inputs outputs metadata = do
+    -- Implementation depends on specific Cardano API usage
+    error "Not implemented: createTransaction"
+
+-- Function to submit a transaction
+submitTransaction :: Config -> Tx CtxTx -> IO ()
+submitTransaction Config{..} tx = do
+    -- Implementation depends on specific Cardano API usage
+    error "Not implemented: submitTransaction"
+
+-- Function to query the current tip of the chain
+queryChainTip :: Config -> IO Block
+queryChainTip Config{..} = do
+    -- Implementation depends on specific Cardano API usage
+    error "Not implemented: queryChainTip"
+
+-- Function to start a block production node (if running as a stake pool)
+startBlockProduction :: Config -> IO ()
+startBlockProduction config = do
+    -- Implementation depends on specific Cardano API usage
+    error "Not implemented: startBlockProduction"
+
+-- Helper function to convert our Transaction type to Cardano's Tx type
+convertTransaction :: Transaction -> IO (Tx CtxTx)
+convertTransaction Transaction{..} = do
+    -- Implementation depends on specific Cardano API usage
+    error "Not implemented: convertTransaction"
+
+-- Helper function to hash a block
+hashBlock :: Block -> Hash BlockHeader
+hashBlock Block{..} = headerHash
+
+-- Simplified consensus mechanism (Ouroboros in Cardano's case)
+-- This is a placeholder and would need to be replaced with actual Ouroboros logic
+isSlotLeader :: Config -> SlotNo -> IO Bool
+isSlotLeader Config{..} slotNo = do
+    -- In reality, this would involve complex cryptographic operations
+    -- and would depend on the stake distribution
+    error "Not implemented: isSlotLeader"
+
+-- Start EKG monitoring server
+startEKGServer :: IO ()
+startEKGServer = do
+    server <- EKG.forkServer "localhost" 8000
+    EKG.registerGcMetrics metrics
+    -- Register other metrics as needed
+
+
+
+
+
+9 1. CHAT KRILNO IMPLEMENT 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module SuperiorBlockchain where
+
+import Plutus.Contract
+import PlutusTx.Prelude
+import Plutus.V1.Ledger.Api
+import Plutus.V1.Ledger.Scripts
+import Plutus.V1.Ledger.Contexts
+import Plutus.V1.Ledger.Value
+import Plutus.V1.Ledger.Time
+import Plutus.V1.Ledger.Crypto
+import PlutusTx
+import Prelude (Show, String)
+import qualified Prelude as P
+import GHC.Generics (Generic)
+import Data.Text (Text)
+import Ledger (Address, PaymentPubKeyHash(..), ScriptContext(..), Validator)
+import Ledger.Constraints (TxConstraints(..), mustPayToTheScript, mustIncludeDatum)
+import Ledger.Typed.Scripts (TypedValidator, mkTypedValidator, validatorScript)
+import Ledger.Ada as Ada
+import Data.Aeson (ToJSON, FromJSON)
+import Control.Monad (void)
+import Text.Printf (printf)
+
+-- | Define the data type for our custom token and smart contract parameters
+data SuperiorToken = SuperiorToken
+    { tokenName :: !BuiltinByteString
+    , tokenSupply :: !Integer
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''SuperiorToken
+
+-- | Define the custom transaction data structure
+data SuperiorTx = SuperiorTx
+    { txSender :: !PaymentPubKeyHash
+    , txReceiver :: !PaymentPubKeyHash
+    , txAmount :: !Integer
+    } deriving (Show, Generic)
+
+PlutusTx.unstableMakeIsData ''SuperiorTx
+
+-- | The validator logic for the SuperiorToken smart contract
+{-# INLINABLE mkValidator #-}
+mkValidator :: SuperiorToken -> SuperiorTx -> ScriptContext -> Bool
+mkValidator token tx ctx =
+    traceIfFalse "Insufficient funds in the sender's account" checkFunds &&
+    traceIfFalse "Invalid token name" checkTokenName &&
+    traceIfFalse "Transaction must have a valid deadline" checkDeadline
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    checkFunds :: Bool
+    checkFunds = valueOf (txOutValue (head (getContinuingOutputs ctx))) (ownCurrencySymbol ctx) tokenName' >= txAmount tx
+
+    checkTokenName :: Bool
+    checkTokenName = tokenName' == tokenName token
+
+    checkDeadline :: Bool
+    checkDeadline = from (txInfoValidRange info) >= lowerBound (txInfoValidRange info)
+
+    tokenName' :: BuiltinByteString
+    tokenName' = unCurrencySymbol $ ownCurrencySymbol ctx
+
+-- | Define the typed validator
+typedValidator :: SuperiorToken -> TypedValidator SuperiorTx
+typedValidator token = mkTypedValidator @SuperiorTx
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = wrapValidator
+
+-- | The validator script to be used on-chain
+validator :: SuperiorToken -> Validator
+validator = validatorScript . typedValidator
+
+-- | The address of the smart contract
+contractAddress :: SuperiorToken -> Address
+contractAddress = scriptAddress . validator
+
+-- | The Plutus contract that uses the SuperiorToken smart contract
+superiorTokenContract :: SuperiorToken -> Contract () EmptySchema Text ()
+superiorTokenContract token = do
+    let tx = mustPayToTheScript tokenName (Ada.lovelaceValueOf 1000000)
+    void $ submitTxConstraints (typedValidator token) tx
+    logInfo @String $ printf "Token %s has been minted successfully." (show $ tokenName token)
+
+-- | Example implementation of the consensus mechanism (Proof-of-Stake)
+{-# INLINABLE selectStakeholder #-}
+selectStakeholder :: [PaymentPubKeyHash] -> Slot -> PaymentPubKeyHash
+selectStakeholder stakeholders slot =
+    stakeholders !! (fromInteger $ (toInteger slot) `mod` (toInteger $ length stakeholders))
+
+-- | Example of a high-level API for developer-friendly interactions
+data SuperiorAPI = SuperiorAPI
+    { mintToken :: SuperiorToken -> IO ()
+    , transferToken :: SuperiorTx -> IO ()
+    }
+
+-- | Implementation of the SuperiorAPI
+instance SuperiorAPI where
+    mintToken token = do
+        let tokenMinting = superiorTokenContract token
+        runContract tokenMinting
+        P.putStrLn $ "Minted token: " ++ show (tokenName token)
+
+    transferToken tx = do
+        let txValidation = mustIncludeDatum (Datum $ PlutusTx.toData tx)
+        runContract txValidation
+        P.putStrLn $ "Transferred " ++ show (txAmount tx) ++ " of token."
+
+-- | Launch the blockchain node with this custom configuration
+launchNode :: IO ()
+launchNode = do
+    -- Define the stakeholders (validators) for the network
+    let stakeholders = [PaymentPubKeyHash "stakeholder1", PaymentPubKeyHash "stakeholder2"]
+
+    -- Run a simple Proof-of-Stake consensus algorithm
+    let selectedStakeholder = selectStakeholder stakeholders 100
+    P.putStrLn $ "Selected stakeholder for block validation: " ++ show selectedStakeholder
+
+    -- Start the Plutus contract runtime
+    let token = SuperiorToken {tokenName = "SuperToken", tokenSupply = 1000000}
+    mintToken token
+
+
+
+
+
+9 1 PERPLEXITY AA KRILNO IMPLEMENT 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module EnhancedSuperiorBlockchain where
+
+import Plutus.Contract
+import PlutusTx.Prelude
+import Plutus.V1.Ledger.Api
+import Plutus.V1.Ledger.Scripts
+import Plutus.V1.Ledger.Contexts
+import Plutus.V1.Ledger.Value
+import Plutus.V1.Ledger.Time
+import Plutus.V1.Ledger.Crypto
+import PlutusTx
+import Prelude (Show, String)
+import qualified Prelude as P
+import GHC.Generics (Generic)
+import Data.Text (Text)
+import Ledger (Address, PaymentPubKeyHash(..), ScriptContext(..), Validator)
+import Ledger.Constraints (TxConstraints(..), mustPayToTheScript, mustIncludeDatum)
+import Ledger.Typed.Scripts (TypedValidator, mkTypedValidator, validatorScript)
+import Ledger.Ada as Ada
+import Data.Aeson (ToJSON, FromJSON)
+import Control.Monad (void)
+import Text.Printf (printf)
+
+-- Enhanced token system
+data EnhancedToken = EnhancedToken
+    { tokenName :: !BuiltinByteString
+    , tokenSupply :: !Integer
+    , tokenDecimals :: !Integer
+    , tokenMetadata :: !BuiltinByteString
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''EnhancedToken
+
+-- Scalability: Implement sharding
+data Shard = Shard
+    { shardId :: !Integer
+    , shardValidator :: !PaymentPubKeyHash
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''Shard
+
+-- Privacy: zk-SNARK structure (simplified)
+data ZkProof = ZkProof
+    { zkProofData :: !BuiltinByteString
+    , zkVerificationKey :: !BuiltinByteString
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''ZkProof
+
+-- Interoperability: Cross-chain transaction
+data CrossChainTx = CrossChainTx
+    { sourceChain :: !BuiltinByteString
+    , destChain :: !BuiltinByteString
+    , txData :: !BuiltinByteString
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''CrossChainTx
+
+-- Governance: Proposal structure
+data Proposal = Proposal
+    { proposalId :: !Integer
+    , proposalDescription :: !BuiltinByteString
+    , proposalVotes :: !Integer
+    , proposalDeadline :: !POSIXTime
+    } deriving (Show, Generic)
+
+PlutusTx.makeLift ''Proposal
+
+-- Enhanced smart contract
+data EnhancedTx = EnhancedTx
+    { txSender :: !PaymentPubKeyHash
+    , txReceiver :: !PaymentPubKeyHash
+    , txAmount :: !Integer
+    , txShard :: !Shard
+    , txZkProof :: !ZkProof
+    , txCrossChain :: !(Maybe CrossChainTx)
+    } deriving (Show, Generic)
+
+PlutusTx.unstableMakeIsData ''EnhancedTx
+
+-- Enhanced validator logic
+{-# INLINABLE mkEnhancedValidator #-}
+mkEnhancedValidator :: EnhancedToken -> EnhancedTx -> ScriptContext -> Bool
+mkEnhancedValidator token tx ctx =
+    traceIfFalse "Insufficient funds" checkFunds &&
+    traceIfFalse "Invalid shard" checkShard &&
+    traceIfFalse "Invalid zk-SNARK proof" verifyZkProof &&
+    traceIfFalse "Invalid cross-chain transaction" verifyCrossChain
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    checkFunds :: Bool
+    checkFunds = valueOf (txOutValue (head (getContinuingOutputs ctx))) (ownCurrencySymbol ctx) (tokenName token) >= txAmount tx
+
+    checkShard :: Bool
+    checkShard = shardValidator (txShard tx) `elem` txInfoSignatories info
+
+    verifyZkProof :: Bool
+    verifyZkProof = True  -- Simplified; actual zk-SNARK verification would go here
+
+    verifyCrossChain :: Bool
+    verifyCrossChain = case txCrossChain tx of
+        Nothing -> True
+        Just crossChainTx -> True  -- Simplified; actual cross-chain verification would go here
+
+-- Scalability: Implement a basic sharding mechanism
+assignShard :: EnhancedTx -> Shard
+assignShard tx = Shard
+    { shardId = toInteger (getPubKeyHash (txSender tx)) `mod` 10  -- Simple shard assignment based on sender
+    , shardValidator = txSender tx  -- For simplicity, we're using the sender as the validator
+    }
+
+-- Privacy: Simplified zk-SNARK generation (placeholder)
+generateZkProof :: EnhancedTx -> ZkProof
+generateZkProof tx = ZkProof
+    { zkProofData = "dummy_proof_data"
+    , zkVerificationKey = "dummy_verification_key"
+    }
+
+-- Interoperability: Cross-chain transaction handler
+handleCrossChainTx :: CrossChainTx -> IO ()
+handleCrossChainTx crossChainTx = do
+    -- Simplified cross-chain handling logic
+    P.putStrLn $ "Processing cross-chain transaction from " ++ show (sourceChain crossChainTx) ++ " to " ++ show (destChain crossChainTx)
+
+-- Governance: Proposal submission and voting
+submitProposal :: Proposal -> IO ()
+submitProposal proposal = do
+    -- Simplified proposal submission logic
+    P.putStrLn $ "Submitted proposal: " ++ show (proposalDescription proposal)
+
+voteOnProposal :: Proposal -> PaymentPubKeyHash -> Bool -> IO ()
+voteOnProposal proposal voter decision = do
+    -- Simplified voting logic
+    let voteStr = if decision then "in favor of" else "against"
+    P.putStrLn $ "Voter " ++ show voter ++ " voted " ++ voteStr ++ " proposal " ++ show (proposalId proposal)
+
+-- Enhanced API for developer-friendly interactions
+data EnhancedBlockchainAPI = EnhancedBlockchainAPI
+    { createToken :: EnhancedToken -> IO ()
+    , transferToken :: EnhancedTx -> IO ()
+    , proposeChange :: Proposal -> IO ()
+    , vote :: Proposal -> PaymentPubKeyHash -> Bool -> IO ()
+    , executeCrossChainTx :: CrossChainTx -> IO ()
+    }
+
+-- Implementation of the EnhancedBlockchainAPI
+enhancedBlockchainAPI :: EnhancedBlockchainAPI
+enhancedBlockchainAPI = EnhancedBlockchainAPI
+    { createToken = \token -> P.putStrLn $ "Created token: " ++ show (tokenName token)
+    , transferToken = \tx -> do
+        let shard = assignShard tx
+        let zkProof = generateZkProof tx
+        P.putStrLn $ "Transferred " ++ show (txAmount tx) ++ " tokens on shard " ++ show (shardId shard)
+    , proposeChange = submitProposal
+    , vote = voteOnProposal
+    , executeCrossChainTx = handleCrossChainTx
+    }
+
+-- Main function to demonstrate the enhanced blockchain functionality
+main :: IO ()
+main = do
+    let token = EnhancedToken "SuperToken" 1000000 18 "ipfs://Qm..."
+    createToken enhancedBlockchainAPI token
+
+    let tx = EnhancedTx
+            { txSender = PaymentPubKeyHash "sender"
+            , txReceiver = PaymentPubKeyHash "receiver"
+            , txAmount = 100
+            , txShard = Shard 0 (PaymentPubKeyHash "validator")
+            , txZkProof = ZkProof "proof" "key"
+            , txCrossChain = Nothing
+            }
+    transferToken enhancedBlockchainAPI tx
+
+    let proposal = Proposal 1 "Increase block size" 0 100
+    proposeChange enhancedBlockchainAPI proposal
+    vote enhancedBlockchainAPI proposal (PaymentPubKeyHash "voter1") True
+
+    let crossChainTx = CrossChainTx "ETH" "SuperiorChain" "tx_data"
+    executeCrossChainTx enhancedBlockchainAPI crossChainTx
+
+    P.putStrLn "Enhanced blockchain operations completed."
+
+
+
+
+
+
+
+
+
+
+
+
+
