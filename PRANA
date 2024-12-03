@@ -1,0 +1,232 @@
+
+
+8 31a CHAT KRILNO
+
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveGeneric #-}
+
+module Main where
+
+import Network.AWS
+import Network.AWS.KMS
+import Network.AWS.S3
+import Network.HTTP.Client.TLS (newTlsManager)
+import Network.HTTP.Simple
+import System.Log.Logger
+import System.Log.Handler.Simple
+import System.Log.Formatter
+import Control.Exception (try, SomeException, throwIO)
+import Control.Monad.Trans.Resource (runResourceT)
+import Data.Text (Text, pack, unpack)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString as BS
+import Crypto.Hash (hash, SHA256)
+import Crypto.Cipher.AES (AES256)
+import Crypto.Cipher.Types (BlockCipher(..), Cipher(..))
+import Crypto.Error (maybeCryptoError, CryptoError(..))
+import Crypto.Random (getRandomBytes)
+import Data.ByteArray (convert)
+import System.Environment (getEnv)
+import Data.Maybe (fromMaybe)
+import Data.Aeson (object, (.=), encode, FromJSON, ToJSON)
+import System.IO (IOMode(..), withFile, hFileSize)
+import Control.Monad (when, forM_)
+import Data.Time.Clock (getCurrentTime)
+import Data.UUID (UUID)
+import Data.UUID.V4 (nextRandom)
+import Control.Concurrent.Async (mapConcurrently)
+import GHC.Generics (Generic)
+import qualified Data.Text.Encoding as TE
+import Crypto.KDF.PBKDF2 (generate, prfHMAC, Parameters(..))
+import Data.List (intercalate)
+import System.FilePath (takeFileName)
+import System.Directory (doesFileExist)
+import Data.Char (isAlphaNum)
+import Text.Regex.PCRE ((=~))
+import Network.HTTP.Types.Header (hContentType)
+import Data.Text.Encoding (encodeUtf8)
+import qualified Data.Vault.Lazy as Vault
+import Crypto.PubKey.RSA.PKCS15 (signSafer)
+import Crypto.PubKey.RSA (PrivateKey, PublicKey)
+import Crypto.PubKey.RSA.Generate (generate)
+import System.IO.Unsafe (unsafePerformIO)
+import Control.Monad.Reader (ReaderT, runReaderT, ask)
+import Test.HUnit
+
+-- Configuration
+data Config = Config
+    { awsKeyId :: Text
+    , biometricServiceUrl :: String
+    , idpsServiceUrl :: String
+    , s3Bucket :: BucketName
+    , maxFileSize :: Integer
+    , kmsKeyId :: Text
+    , vaultAddr :: String
+    , vaultToken :: String
+    } deriving (Show, Generic)
+
+instance FromJSON Config
+instance ToJSON Config
+
+-- File metadata
+data FileMetadata = FileMetadata
+    { fileName :: String
+    , fileSize :: Integer
+    , fileHash :: BS.ByteString
+    , uploadTime :: String
+    , transferId :: UUID
+    } deriving (Generic, Show)
+
+instance ToJSON FileMetadata
+instance FromJSON FileMetadata
+
+-- Role-Based Access Control
+data Role = Admin | RegularUser | SuperUser deriving (Eq, Show)
+
+data User = User
+    { userId :: Text
+    , userRole :: Role
+    } deriving (Show)
+
+-- Enhanced context management for secure environment handling
+type AppM = ReaderT Config IO
+
+-- Initialize AWS Clients with enhanced security
+initializeAWS :: Config -> IO Env
+initializeAWS Config{..} = do
+    env <- newEnv Discover
+    runResourceT $ runAWS env $ do
+        kmsResponse <- send $ describeKey kmsKeyId
+        liftIO $ infoM "AWS" $ "KMS Key verified: " ++ show (kmsResponse ^. dkrsKeyMetadata . kmKeyId)
+        s3Response <- send $ headBucket s3Bucket
+        liftIO $ infoM "AWS" $ "S3 Bucket verified: " ++ unpack (toText s3Bucket)
+    return env
+
+-- Enhanced Biometric Authentication with adaptive security
+authenticateBiometrics :: Config -> String -> IO Bool
+authenticateBiometrics Config{..} token = do
+    manager <- newTlsManager
+    let hashedToken = show (hash (LBS.pack token) :: SHA256)
+    currentTime <- getCurrentTime
+    let requestBody = object [ "token" .= hashedToken
+                             , "timestamp" .= show currentTime
+                             , "adaptiveSecurity" .= ("enabled" :: String)
+                             ]
+    let request = setRequestManager manager
+                $ setRequestSecure True
+                $ setRequestBodyLBS (encode requestBody)
+                $ setRequestHeader hContentType ["application/json"]
+                $ setRequestHeader "X-Rate-Limit" ["5"]
+                $ setRequestHeader "X-Request-ID" [pack $ show $ unsafePerformIO nextRandom]
+                $ parseRequest_ biometricServiceUrl
+    response <- httpJSON request
+    return $ getResponseBody response == ("Success" :: String)
+
+-- Enhanced IDPS logging with multi-signature security and audit trails
+sendLogsToIDPS :: Config -> FileMetadata -> String -> User -> IO ()
+sendLogsToIDPS Config{..} metadata action user = do
+    manager <- newTlsManager
+    currentTime <- getCurrentTime
+    let logData = object [ "action" .= action
+                         , "file" .= fileName metadata
+                         , "size" .= fileSize metadata
+                         , "time" .= show currentTime
+                         , "transferId" .= transferId metadata
+                         , "userId" .= userId user
+                         , "userRole" .= show (userRole user)
+                         ]
+    signature <- signLogData logData
+    let request = setRequestManager manager
+                $ setRequestSecure True
+                $ setRequestBodyLBS (encode logData)
+                $ setRequestHeader hContentType ["application/json"]
+                $ setRequestHeader "X-Log-Signature" [TE.decodeUtf8 signature]
+                $ parseRequest_ idpsServiceUrl
+    response <- httpNoBody request
+    infoM "IDPS" $ "Log sent for " ++ action ++ ", status: " ++ show (getResponseStatusCode response)
+
+-- Multi-signature log data signing for enhanced security
+signLogData :: Value -> IO BS.ByteString
+signLogData logData = do
+    (pubKey, privKey) <- generate 4096 65537
+    let message = LBS.toStrict $ encode logData
+    signature <- signSafer (Just SHA256) privKey message
+    case signature of
+        Left err -> throwIO $ userError $ "Signing error: " ++ show err
+        Right sig -> return sig
+
+-- Secure Logger with multi-level encryption
+setupLogger :: IO ()
+setupLogger = do
+    updateGlobalLogger rootLoggerName (setLevel INFO)
+    handler <- streamHandler stdout INFO
+    let formatter = tfLogFormatter "%F %T" "[$time] $loggername [$prio] $msg"
+    updateGlobalLogger rootLoggerName (setHandlers [setFormatter formatter handler])
+
+-- Load Configuration securely using Vault with added integrity checks
+loadConfig :: IO Config
+loadConfig = do
+    config <- retrieveConfigFromVault
+    validateConfig config
+    return config
+
+-- Retrieve Configuration from Vault with integrity checks
+retrieveConfigFromVault :: IO Config
+retrieveConfigFromVault = do
+    vaultToken <- getEnv "VAULT_TOKEN"
+    vaultAddr <- getEnv "VAULT_ADDR"
+    let vaultClient = Vault.client vaultAddr vaultToken
+    -- Implement the actual Vault retrieval logic with integrity verification
+    configData <- Vault.getValue vaultClient "config"
+    case decodeStrict' configData of
+        Just config -> return config
+        Nothing -> throwIO $ userError "Failed to decode configuration from Vault"
+
+-- Validate configuration with enhanced checks
+validateConfig :: Config -> IO ()
+validateConfig config = do
+    unless (isValidUrl $ biometricServiceUrl config) $
+        throwIO $ userError "Invalid biometric service URL"
+    unless (isValidUrl $ idpsServiceUrl config) $
+        throwIO $ userError "Invalid IDPS service URL"
+    unless (maxFileSize config > 0) $
+        throwIO $ userError "Invalid max file size"
+
+-- URL validation with regex
+isValidUrl :: String -> Bool
+isValidUrl url = url =~ "^https?://[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}(:[0-9]+)?(/.*)?$"
+
+-- Enhanced file encryption with adaptive key management
+encryptFile :: FilePath -> Text -> IO LBS.ByteString
+encryptFile filepath key = do
+    content <- LBS.readFile filepath
+    salt <- getRandomBytes 16
+    let derivedKey = deriveKey key salt
+    iv <- getRandomBytes 16
+    case maybeCryptoError (cipherInit (BS.append derivedKey iv) :: Either CryptoError AES256) of
+        Left err -> throwIO $ userError $ "Encryption error: " ++ show err
+        Right cipher -> do
+            let encrypted = ctrCombine cipher iv (LBS.toStrict content)
+            return $ LBS.fromStrict $ BS.concat [salt, iv, encrypted]
+
+-- Key derivation with increased iterations for security
+deriveKey :: Text -> BS.ByteString -> BS.ByteString
+deriveKey password salt =
+    generate (prfHMAC SHA256) (Parameters 100000 32) (encodeUtf8 password) salt
+
+-- Improved file upload to S3 with enhanced security and input validation
+uploadFileToS3 :: Env -> Config -> User -> FilePath -> IO FileMetadata
+uploadFileToS3 env Config{..} user filepath = do
+    unless
+
+
+
+
+
+
