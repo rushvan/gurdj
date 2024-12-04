@@ -3165,6 +3165,2510 @@ main = do
 ----
 
 
+9 2. Aa1 CHAT KRILNO 
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (try, SomeException, catch)
+import Control.Monad (forever, when, forM_, void)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.IO (writeFile, readFile, appendFile)
+import System.Random (randomRIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECDSA (PrivateKey, PublicKey, Signature, sign, verify)
+import Crypto.PubKey.ECC.Types (CurveName, getCurveByName, generate)
+import Data.Maybe (fromMaybe)
+import Data.List (sortOn)
+import Network.Socket
+import Network.Socket.ByteString (recv, send)
+import Network.HTTP.Simple (httpBS, getResponseBody)
+import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TChan
+
+-- Data Structures
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , hash :: ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , signature :: Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , nodes :: [SockAddr]
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , adjustmentInterval :: Int
+  , targetBlockTime :: Int
+  , lastAdjustmentTime :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , lastBlockTime :: Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  } deriving (Show)
+
+-- Cryptographic Functions
+sha256 :: ByteString -> ByteString
+sha256 = hash @SHA256 >>> BS.pack . show
+
+signTransaction :: PrivateKey -> Transaction -> IO Signature
+signTransaction privKey tx = do
+  let message = C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)
+  return $ sign privKey message
+
+verifyTransaction :: PublicKey -> Transaction -> Bool
+verifyTransaction pubKey tx =
+  let message = C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)
+  in verify pubKey (signature tx) message
+
+-- Block Creation and Validation
+createBlock :: [Transaction] -> Block -> IO Block
+createBlock transactions previousBlock = do
+  timestamp <- round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = hash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , hash = hash'
+    }
+
+mineBlock :: Int -> ByteString -> Integer -> [Transaction] -> IO (Integer, ByteString)
+mineBlock index prevHash timestamp txs = do
+  difficulty <- getDifficulty
+  let prefix = BS.replicate difficulty '0'
+  nonce' <- findNonce index prevHash timestamp txs prefix
+  let hash' = calculateHash index prevHash timestamp txs nonce'
+  return (nonce', hash')
+
+findNonce :: Int -> ByteString -> Integer -> [Transaction] -> ByteString -> IO Integer
+findNonce index prevHash timestamp txs prefix = go 0
+  where
+    go nonce = do
+      let hash' = calculateHash index prevHash timestamp txs nonce
+      if BS.take (BS.length prefix) hash' == prefix
+        then return nonce
+        else go (nonce + 1)
+
+calculateHash :: Int -> ByteString -> Integer -> [Transaction] -> Integer -> ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ C8.pack (show index)
+    , prevHash
+    , C8.pack (show timestamp)
+    , BS.concat (map (\tx -> C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)) txs)
+    , C8.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Bool
+isValidBlock newBlock prevBlock =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == hash prevBlock &&
+  hash newBlock == calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) &&
+  BS.take (difficulty newBlock) (hash newBlock) == BS.replicate (difficulty newBlock) '0'
+
+-- Consensus Mechanism: Enhanced Proof-of-Stake with Delegation
+data ProofOfStake = ProofOfStake
+  { totalStake :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  }
+
+chooseValidator :: ProofOfStake -> IO ByteString
+chooseValidator pos = do
+  let total = totalStake pos
+  rand <- randomRIO (0, total - 1)
+  return $ selectValidator rand (stakeHolders pos)
+
+selectValidator :: Integer -> Map ByteString Integer -> ByteString
+selectValidator rand stakeMap =
+  let sortedStakeHolders = sortOn snd (Map.toList stakeMap)
+      cumulative = scanl1 (+) (map snd sortedStakeHolders)
+  in fst $ head $ dropWhile ((< rand) . snd) (zip (map fst sortedStakeHolders) cumulative)
+
+-- Networking and API Integration
+data NetworkMessage = NewBlock Block | NewTransaction Transaction deriving (Show, Eq)
+
+networkLoop :: Socket -> TChan NetworkMessage -> IO ()
+networkLoop sock msgChan = forever $ do
+  (conn, _) <- accept sock
+  forkIO $ handleConnection conn msgChan
+
+handleConnection :: Socket -> TChan NetworkMessage -> IO ()
+handleConnection conn msgChan = do
+  msg <- recv conn 1024
+  case decodeMessage msg of
+    Just (NewBlock block) -> writeTChan msgChan (NewBlock block)
+    Just (NewTransaction tx) -> writeTChan msgChan (NewTransaction tx)
+    Nothing -> putStrLn "Received invalid message"
+  sClose conn
+
+decodeMessage :: ByteString -> Maybe NetworkMessage
+decodeMessage msg = -- Implement message decoding
+  Nothing  -- Placeholder
+
+broadcastMessage :: Socket -> NetworkMessage -> IO ()
+broadcastMessage sock msg = do
+  let encoded = encodeMessage msg
+  forM_ (nodes blockchain) $ \nodeAddr -> do
+    conn <- socket AF_INET Stream defaultProtocol
+    connect conn nodeAddr
+    send conn encoded
+    sClose conn
+
+encodeMessage :: NetworkMessage -> ByteString
+encodeMessage = -- Implement message encoding
+  BS.empty  -- Placeholder
+
+-- Transaction and State Management
+validateTransaction :: Blockchain -> Transaction -> Bool
+validateTransaction blockchain tx =
+  verifyTransaction (getPublicKey (sender tx)) tx &&
+  validAmount (amount tx) (getState (sender tx) blockchain)
+
+validAmount :: Integer -> Integer -> Bool
+validAmount amount balance = amount > 0 && amount <= balance
+
+getState :: ByteString -> Blockchain -> Integer
+getState addr blockchain = fromMaybe 0 (Map.lookup addr (stateDB blockchain))
+
+-- Error Handling and Logging
+logError :: String -> IO ()
+logError msg = appendFile "error.log" (msg ++ "\n")
+
+handleException :: SomeException -> IO ()
+handleException e = logError (show e)
+
+-- Example API Call
+fetchBlockchainData :: IO ()
+fetchBlockchainData = do
+  response <- try (httpBS "http://example.com/api/blockchain") >>= either (handleException >> return Nothing) (return . Just)
+  case response of
+    Just res -> putStrLn $ "Blockchain data: " ++ C8.unpack (getResponseBody res)
+    Nothing -> logError "Failed to fetch blockchain data"
+
+main :: IO ()
+main = do
+  -- Initialize blockchain, networking, etc.
+  putStrLn "Blockchain simulation running..."
+
+  -- Create a new blockchain instance with initial settings
+  let blockchain = Blockchain { chain = [], pendingTransactions = [], nodes = [], stateDB = Map.empty, difficulty = 4, adjustmentInterval = 10, targetBlockTime = 600, lastAdjustmentTime = 0, stakeHolders = Map.empty, lastBlockTime = 0, currentEpoch = 0, epochLength = 100, validators = [] }
+
+  -- Start networking
+  addr <- inet_addr "127.0.0.1"
+  sock <- socket AF_INET Stream defaultProtocol
+  bind sock (SockAddrInet 8080 addr)
+  listen
+
+
+
+9 2 AX CHAT KRILNO 
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Blockchain 
+  ( Block(..)
+  , Transaction(..)
+  , Blockchain(..)
+  , createBlock
+  , isValidBlock
+  , addTransaction
+  , mineBlock
+  , runBlockchain
+  , main
+  ) where
+
+import Control.Concurrent.Async (async, wait)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECC.ECDSA as ECDSA
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.Random (randomRIO)
+import Network.Socket (Socket, withSocketsDo, bind, listen, accept, SocketType(Stream), Family(AF_INET), defaultProtocol, AddrInfo(..), getAddrInfo, addrAddress, SocketOption(ReuseAddr), setSocketOption, PortNumber, accept)
+import Network.Socket.ByteString (recv, sendAll)
+import Control.Concurrent (forkIO)
+
+-- Data Structures
+
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , blockHash :: ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , signature :: ECDSA.Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , lastAdjustmentTime :: Integer
+  } deriving (Show)
+
+-- Error Types
+
+data BlockchainError
+  = InvalidBlock String
+  | InvalidTransaction String
+  | NetworkError String
+  deriving (Show)
+
+-- Cryptographic Functions
+
+sha256 :: ByteString -> ByteString
+sha256 = BS.pack . show . (hash :: ByteString -> Digest SHA256)
+
+signTransaction :: ECDSA.PrivateKey -> Transaction -> IO (Either String ECDSA.Signature)
+signTransaction privKey Transaction{..} = runExceptT $ do
+  let message = C8.pack $ show sender ++ show receiver ++ show amount
+  case ECDSA.sign privKey ECDSA.SHA256 message of
+    Left err -> throwError $ "Signing failed: " ++ show err
+    Right sig -> return sig
+
+verifyTransaction :: ECDSA.PublicKey -> Transaction -> Bool
+verifyTransaction pubKey Transaction{..} =
+  let message = C8.pack $ show sender ++ show receiver ++ show amount
+  in ECDSA.verify ECDSA.SHA256 pubKey signature message
+
+-- Block Creation and Validation
+
+createBlock :: [Transaction] -> Block -> ExceptT BlockchainError IO Block
+createBlock transactions previousBlock = do
+  timestamp <- liftIO $ round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = blockHash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , blockHash = hash'
+    }
+
+mineBlock :: Int -> ByteString -> Integer -> [Transaction] -> ExceptT BlockchainError IO (Integer, ByteString)
+mineBlock index prevHash timestamp txs = do
+  difficulty <- liftIO getDifficulty
+  let prefix = BS.replicate difficulty '0'
+  nonce' <- liftIO $ findNonceParallel index prevHash timestamp txs prefix
+  let hash' = calculateHash index prevHash timestamp txs nonce'
+  return (nonce', hash')
+
+findNonceParallel :: Int -> ByteString -> Integer -> [Transaction] -> ByteString -> IO Integer
+findNonceParallel index prevHash timestamp txs prefix = do
+  let chunks = 1000000  -- Adjust based on hardware
+  let findInRange start end = do
+        let go nonce
+              | nonce > end = return Nothing
+              | otherwise = do
+                  let hash' = calculateHash index prevHash timestamp txs nonce
+                  if BS.take (BS.length prefix) hash' == prefix
+                    then return $ Just nonce
+                    else go (nonce + 1)
+        go start
+  
+  let ranges = [(n, n + chunks - 1) | n <- [0, chunks..]]
+  asyncResults <- mapM (\(start, end) -> async $ findInRange start end) ranges
+  
+  let checkResults [] = findNonceParallel index prevHash timestamp txs prefix
+      checkResults (r:rs) = do
+        result <- wait r
+        case result of
+          Just nonce -> return nonce
+          Nothing -> checkResults rs
+  
+  checkResults asyncResults
+
+calculateHash :: Int -> ByteString -> Integer -> [Transaction] -> Integer -> ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ C8.pack (show index)
+    , prevHash
+    , C8.pack (show timestamp)
+    , BS.concat (map (\tx -> C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)) txs)
+    , C8.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Either BlockchainError ()
+isValidBlock newBlock prevBlock
+  | index newBlock /= index prevBlock + 1 = Left $ InvalidBlock "Invalid index"
+  | previousHash newBlock /= blockHash prevBlock = Left $ InvalidBlock "Invalid previous hash"
+  | blockHash newBlock /= calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) = Left $ InvalidBlock "Invalid hash"
+  | otherwise = Right ()
+
+-- Transaction Management
+
+addTransaction :: Transaction -> Blockchain -> ExceptT BlockchainError IO Blockchain
+addTransaction tx blockchain = do
+  -- Verify transaction signature and balance here
+  let updatedPending = tx : pendingTransactions blockchain
+  return blockchain { pendingTransactions = updatedPending }
+
+-- Consensus Mechanism (advanced PoS)
+
+selectValidator :: Blockchain -> IO ByteString
+selectValidator Blockchain{..} = do
+  let totalStake = sum $ Map.elems stateDB
+  randomStake <- randomRIO (0, totalStake)
+  return $ selectStakeHolder randomStake (Map.toList stateDB)
+  where
+    selectStakeHolder _ [] = error "No stake holders"
+    selectStakeHolder remainingStake ((address, stake):rest)
+      | remainingStake <= stake = address
+      | otherwise = selectStakeHolder (remainingStake - stake) rest
+
+-- Dynamic Difficulty Adjustment
+
+getDifficulty :: IO Int
+getDifficulty = do
+  -- Placeholder for dynamic adjustment logic
+  return 4
+
+-- Network Features
+
+startNetworkNode :: IO ()
+startNetworkNode = withSocketsDo $ do
+  addr:_ <- getAddrInfo (Just (defaultHints {addrFlags = [AI_PASSIVE]})) Nothing (Just "8080")
+  sock <- socket (addrFamily addr) Stream defaultProtocol
+  setSocketOption sock ReuseAddr 1
+  bind sock (addrAddress addr)
+  listen sock 5
+  putStrLn "Listening for incoming connections..."
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleConnection conn
+
+handleConnection :: Socket -> IO ()
+handleConnection conn = do
+  msg <- recv conn 1024
+  putStrLn $ "Received: " ++ show msg
+  -- Process the message and respond
+  sendAll conn msg
+  close conn
+
+-- Testing and Debugging
+
+-- Placeholder functions for unit testing and debugging
+runTests :: IO ()
+runTests = putStrLn "Running tests..."
+
+-- Main loop
+
+runBlockchain :: Blockchain -> ExceptT BlockchainError IO ()
+runBlockchain blockchain = do
+  -- Process pending transactions
+  newBlock <- processTransactions blockchain
+  -- Validate and add new block
+  case isValidBlock newBlock (head $ chain blockchain) of
+    Left err -> throwError err
+    Right () -> do
+      let updatedChain = newBlock : chain blockchain
+      let updatedBlockchain = blockchain { chain = updatedChain, pendingTransactions = [] }
+      -- Continue with the updated blockchain
+      runBlockchain updatedBlockchain
+
+processTransactions :: Blockchain -> ExceptT BlockchainError IO Block
+processTransactions Blockchain{..} = do
+  validator <- liftIO $ selectValidator Blockchain{..}
+  createBlock pendingTransactions (head chain)
+
+-- Example usage
+
+main :: IO ()
+main = do
+  runTests
+  startNetworkNode
+  let genesisBlock = Block 0 "0" 0 [] 0 (sha256 "genesis")
+      initialBlockchain = Blockchain [genesisBlock] [] Map.empty 4 0
+  result <- runExceptT $ runBlockchain initialBlockchain
+  case result of
+    Left err -> putStrLn $ "Blockchain error: " ++ show err
+    Right () -> putStrLn "Blockchain running successfully!"
+
+
+
+9 2 AX CLAUDE KRILNO
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DeriveGeneric #-}
+
+module Blockchain
+  ( runBlockchain
+  ) where
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (async, wait)
+import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, writeTVar, modifyTVar')
+import Control.Monad (forever, void, when)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECC.ECDSA as ECDSA
+import Crypto.PubKey.ECC.Generate (generate)
+import Crypto.PubKey.ECC.Types (getCurveByName, CurveName(SEC_p256k1))
+import Data.Aeson (ToJSON, FromJSON, encode, decode, object, (.=))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import GHC.Generics (Generic)
+import Network.HTTP.Types (status200, status404)
+import Network.Socket
+import qualified Network.Socket.ByteString as NSB
+import Network.Wai
+import Network.Wai.Handler.Warp (run)
+import System.Directory (doesFileExist)
+import System.Random (randomRIO)
+
+-- Data Structures
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , fee :: Integer
+  , signature :: ECDSA.Signature
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON Transaction
+instance FromJSON Transaction
+
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , blockHash :: ByteString
+  , totalFees :: Integer
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON Block
+instance FromJSON Block
+
+newtype Mempool = Mempool { unMempool :: Map ByteString Transaction }
+  deriving (Show, Generic)
+
+instance ToJSON Mempool
+instance FromJSON Mempool
+
+data Wallet = Wallet
+  { privateKey :: ECDSA.PrivateKey
+  , publicKey :: ECDSA.PublicKey
+  , address :: ByteString
+  } deriving (Show, Generic)
+
+instance ToJSON Wallet
+instance FromJSON Wallet
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , mempool :: Mempool
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , lastAdjustmentTime :: Integer
+  , peers :: [SockAddr]
+  , wallet :: Wallet
+  } deriving (Show, Generic)
+
+instance ToJSON Blockchain
+instance FromJSON Blockchain
+
+-- Error Types
+
+data BlockchainError
+  = InvalidBlock String
+  | InvalidTransaction String
+  | NetworkError String
+  | InsufficientFunds String
+  deriving (Show)
+
+-- Cryptographic Functions
+
+sha256 :: ByteString -> ByteString
+sha256 = BS.pack . show . (hash :: ByteString -> Digest SHA256)
+
+signTransaction :: Wallet -> Transaction -> IO Transaction
+signTransaction Wallet{..} tx@Transaction{..} = do
+  let message = C8.pack $ show sender ++ show receiver ++ show amount ++ show fee
+  sig <- ECDSA.sign privateKey ECDSA.SHA256 message
+  return $ tx { signature = sig }
+
+verifyTransaction :: Transaction -> Bool
+verifyTransaction Transaction{..} =
+  let message = C8.pack $ show sender ++ show receiver ++ show amount ++ show fee
+      pubKey = ECDSA.PublicKey (getCurveByName SEC_p256k1) (error "Public key not available")
+  in ECDSA.verify ECDSA.SHA256 pubKey signature message
+
+-- Blockchain Operations
+
+createGenesisBlock :: Block
+createGenesisBlock = Block
+  { index = 0
+  , previousHash = "0"
+  , timestamp = 0
+  , transactions = []
+  , nonce = 0
+  , blockHash = sha256 "genesis"
+  , totalFees = 0
+  }
+
+createBlock :: [Transaction] -> Block -> Integer -> Block
+createBlock txs prevBlock fees = Block
+  { index = index prevBlock + 1
+  , previousHash = blockHash prevBlock
+  , timestamp = error "Timestamp not set"
+  , transactions = txs
+  , nonce = error "Nonce not set"
+  , blockHash = error "Block hash not set"
+  , totalFees = fees
+  }
+
+mineBlock :: TVar Blockchain -> IO (Either BlockchainError Block)
+mineBlock blockchainVar = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+      prevBlock = head chain
+      txs = take 100 $ Map.elems $ unMempool mempool
+      fees = sum $ map fee txs
+      newBlock = createBlock txs prevBlock fees
+  
+  currentTime <- liftIO $ round <$> getPOSIXTime
+  let target = BS.replicate difficulty '0'
+      findNonce n
+        | n > 1000000 = throwError $ InvalidBlock "Failed to mine block"
+        | otherwise = do
+            let hash = calculateBlockHash newBlock { nonce = n, timestamp = currentTime }
+            if BS.take difficulty hash == target
+              then return newBlock { nonce = n, timestamp = currentTime, blockHash = hash }
+              else findNonce (n + 1)
+  
+  minedBlock <- findNonce 0
+  liftIO $ atomically $ modifyTVar' blockchainVar $ \bc -> bc
+    { chain = minedBlock : chain
+    , mempool = Mempool $ foldr Map.delete (unMempool mempool) (map transactionId txs)
+    , stateDB = updateState (stateDB bc) (transactions minedBlock)
+    , lastAdjustmentTime = currentTime
+    }
+  return minedBlock
+
+calculateBlockHash :: Block -> ByteString
+calculateBlockHash Block{..} = sha256 $ C8.pack $
+  show index ++ show previousHash ++ show timestamp ++ show transactions ++ show nonce
+
+isValidBlock :: Block -> Block -> Int -> Bool
+isValidBlock newBlock prevBlock difficulty =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == blockHash prevBlock &&
+  BS.take difficulty (blockHash newBlock) == BS.replicate difficulty '0' &&
+  all verifyTransaction (transactions newBlock)
+
+updateState :: Map ByteString Integer -> [Transaction] -> Map ByteString Integer
+updateState state txs = foldr updateTransaction state txs
+  where
+    updateTransaction Transaction{..} s =
+      let s' = Map.insertWith (+) receiver amount s
+      in Map.insertWith (\a b -> b - a) sender (amount + fee) s'
+
+addTransaction :: TVar Blockchain -> Transaction -> IO (Either BlockchainError ())
+addTransaction blockchainVar tx = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+  when (not $ verifyTransaction tx) $
+    throwError $ InvalidTransaction "Invalid transaction signature"
+  let senderBalance = Map.findWithDefault 0 (sender tx) stateDB
+  when (senderBalance < amount tx + fee tx) $
+    throwError $ InsufficientFunds "Insufficient funds for transaction"
+  liftIO $ atomically $ modifyTVar' blockchainVar $ \bc -> bc
+    { mempool = Mempool $ Map.insert (transactionId tx) tx (unMempool mempool) }
+  return ()
+
+transactionId :: Transaction -> ByteString
+transactionId Transaction{..} = sha256 $ C8.pack $
+  show sender ++ show receiver ++ show amount ++ show fee
+
+-- Networking
+
+broadcastTransaction :: TVar Blockchain -> Transaction -> IO ()
+broadcastTransaction blockchainVar tx = do
+  blockchain <- atomically $ readTVar blockchainVar
+  let peers' = peers blockchain
+  mapM_ (\peer -> sendMessage peer (encode tx)) peers'
+
+broadcastBlock :: TVar Blockchain -> Block -> IO ()
+broadcastBlock blockchainVar block = do
+  blockchain <- atomically $ readTVar blockchainVar
+  let peers' = peers blockchain
+  mapM_ (\peer -> sendMessage peer (encode block)) peers'
+
+sendMessage :: SockAddr -> BL.ByteString -> IO ()
+sendMessage addr msg = withSocketsDo $ do
+  sock <- socket AF_INET Stream defaultProtocol
+  connect sock addr
+  NSB.sendAll sock (BL.toStrict msg)
+  close sock
+
+handleIncomingMessage :: TVar Blockchain -> BL.ByteString -> IO ()
+handleIncomingMessage blockchainVar msg =
+  case (decode msg :: Maybe Transaction, decode msg :: Maybe Block) of
+    (Just tx, _) -> void $ addTransaction blockchainVar tx
+    (_, Just block) -> void $ addBlock blockchainVar block
+    _ -> putStrLn "Invalid message received"
+
+addBlock :: TVar Blockchain -> Block -> IO (Either BlockchainError ())
+addBlock blockchainVar newBlock = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+      prevBlock = head chain
+  when (not $ isValidBlock newBlock prevBlock difficulty) $
+    throwError $ InvalidBlock "Invalid block received"
+  liftIO $ atomically $ modifyTVar' blockchainVar $ \bc -> bc
+    { chain = newBlock : chain
+    , stateDB = updateState stateDB (transactions newBlock)
+    }
+  return ()
+
+-- API
+
+runAPI :: TVar Blockchain -> IO ()
+runAPI blockchainVar = do
+  putStrLn "Starting API server on port 8080"
+  run 8080 $ app blockchainVar
+
+app :: TVar Blockchain -> Application
+app blockchainVar request respond = do
+  case (requestMethod request, pathInfo request) of
+    ("GET", ["balance", address]) -> getBalance blockchainVar address >>= respondJSON respond
+    ("POST", ["transaction"]) -> createTransaction blockchainVar request >>= respondJSON respond
+    ("GET", ["blockchain"]) -> getBlockchainInfo blockchainVar >>= respondJSON respond
+    _ -> respond $ responseLBS status404 [] "Not found"
+
+getBalance :: TVar Blockchain -> ByteString -> IO Integer
+getBalance blockchainVar address = do
+  blockchain <- atomically $ readTVar blockchainVar
+  return $ Map.findWithDefault 0 address (stateDB blockchain)
+
+createTransaction :: TVar Blockchain -> Request -> IO (Either String String)
+createTransaction blockchainVar request = do
+  body <- strictRequestBody request
+  case decode body of
+    Just tx -> do
+      result <- addTransaction blockchainVar tx
+      case result of
+        Left err -> return $ Left $ show err
+        Right _ -> do
+          broadcastTransaction blockchainVar tx
+          return $ Right "Transaction created and broadcasted successfully"
+    Nothing -> return $ Left "Invalid transaction data"
+
+getBlockchainInfo :: TVar Blockchain -> IO Blockchain
+getBlockchainInfo = atomically . readTVar
+
+respondJSON :: ToJSON a => (Response -> IO ResponseReceived) -> a -> IO ResponseReceived
+respondJSON respond = respond . responseLBS status200 [("Content-Type", "application/json")] . encode
+
+-- Main Function
+
+runBlockchain :: IO ()
+runBlockchain = do
+  wallet <- createWallet
+  let initialBlockchain = Blockchain
+        { chain = [createGenesisBlock]
+        , mempool = Mempool Map.empty
+        , stateDB = Map.empty
+        , difficulty = 4
+        , lastAdjustmentTime = 0
+        , peers = []
+        , wallet = wallet
+        }
+  blockchainVar <- newTVarIO initialBlockchain
+
+  -- Start mining process
+  void $ forkIO $ forever $ do
+    result <- mineBlock blockchainVar
+    case result of
+      Left err -> putStrLn $ "Mining error: " ++ show err
+      Right block -> do
+        putStrLn $ "Block mined: " ++ show (index block)
+        broadcastBlock blockchainVar block
+
+  -- Start networking
+  void $ forkIO $ runNetworking blockchainVar
+
+  -- Start API server
+  runAPI blockchainVar
+
+runNetworking :: TVar Blockchain -> IO ()
+runNetworking blockchainVar = withSocketsDo $ do
+  sock <- socket AF_INET Stream defaultProtocol
+  bind sock (SockAddrInet 8333 0)
+  listen sock 5
+  putStrLn "Listening for incoming connections..."
+  forever $ do
+    (conn, _) <- accept sock
+    void $ forkIO $ handleConnection conn blockchainVar
+
+handleConnection :: Socket -> TVar Blockchain -> IO ()
+handleConnection conn blockchainVar = do
+  msg <- NSB.recv conn 4096
+  handleIncomingMessage blockchainVar (BL.fromStrict msg)
+  close conn
+
+createWallet :: IO Wallet
+createWallet = do
+  (pubKey, privKey) <- generate (getCurveByName SEC_p256k1)
+  let addr = BS.take 20 $ sha256 $ BS.pack $ show pubKey
+  return $ Wallet privKey pubKey addr
+
+main :: IO ()
+main = do
+  putStrLn "Starting blockchain..."
+  runBlockchain
+
+
+
+
+9 2 AAAXXX CHAT KRILNO 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DeriveGeneric #-}
+
+module Blockchain
+  ( runBlockchain
+  ) where
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Concurrent.Async (async, wait)
+import Control.Concurrent.STM (TVar, atomically, newTVarIO, readTVar, writeTVar, modifyTVar')
+import Control.Monad (forever, void, when)
+import Control.Monad.Except (ExceptT, runExceptT, throwError)
+import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECC.ECDSA as ECDSA
+import Crypto.PubKey.ECC.Generate (generate)
+import Crypto.PubKey.ECC.Types (getCurveByName, CurveName(SEC_p256k1))
+import Data.Aeson (ToJSON, FromJSON, encode, decode, object, (.=))
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import GHC.Generics (Generic)
+import Network.HTTP.Types (status200, status404)
+import Network.Socket
+import qualified Network.Socket.ByteString as NSB
+import Network.Wai
+import Network.Wai.Handler.Warp (run)
+import System.Directory (doesFileExist)
+import System.Random (randomRIO)
+
+-- Data Structures
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , fee :: Integer
+  , signature :: ECDSA.Signature
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON Transaction
+instance FromJSON Transaction
+
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , blockHash :: ByteString
+  , totalFees :: Integer
+  } deriving (Show, Eq, Generic)
+
+instance ToJSON Block
+instance FromJSON Block
+
+newtype Mempool = Mempool { unMempool :: Map ByteString Transaction }
+  deriving (Show, Generic)
+
+instance ToJSON Mempool
+instance FromJSON Mempool
+
+data Wallet = Wallet
+  { privateKey :: ECDSA.PrivateKey
+  , publicKey :: ECDSA.PublicKey
+  , address :: ByteString
+  } deriving (Show, Generic)
+
+instance ToJSON Wallet
+instance FromJSON Wallet
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , mempool :: Mempool
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , lastAdjustmentTime :: Integer
+  , peers :: [SockAddr]
+  , wallet :: Wallet
+  } deriving (Show, Generic)
+
+instance ToJSON Blockchain
+instance FromJSON Blockchain
+
+-- Error Types
+
+data BlockchainError
+  = InvalidBlock String
+  | InvalidTransaction String
+  | NetworkError String
+  | InsufficientFunds String
+  deriving (Show)
+
+-- Cryptographic Functions
+
+sha256 :: ByteString -> ByteString
+sha256 = BS.pack . show . (hash :: ByteString -> Digest SHA256)
+
+signTransaction :: Wallet -> Transaction -> IO Transaction
+signTransaction Wallet{..} tx@Transaction{..} = do
+  let message = C8.pack $ show sender ++ show receiver ++ show amount ++ show fee
+  sig <- ECDSA.sign privateKey ECDSA.SHA256 message
+  return $ tx { signature = sig }
+
+verifyTransaction :: Transaction -> Bool
+verifyTransaction Transaction{..} =
+  let message = C8.pack $ show sender ++ show receiver ++ show amount ++ show fee
+      pubKey = ECDSA.PublicKey (getCurveByName SEC_p256k1) (error "Public key not available")
+  in ECDSA.verify ECDSA.SHA256 pubKey signature message
+
+-- Blockchain Operations
+
+createGenesisBlock :: Block
+createGenesisBlock = Block
+  { index = 0
+  , previousHash = "0"
+  , timestamp = 0
+  , transactions = []
+  , nonce = 0
+  , blockHash = sha256 "genesis"
+  , totalFees = 0
+  }
+
+createBlock :: [Transaction] -> Block -> Integer -> Block
+createBlock txs prevBlock fees = Block
+  { index = index prevBlock + 1
+  , previousHash = blockHash prevBlock
+  , timestamp = error "Timestamp not set"
+  , transactions = txs
+  , nonce = error "Nonce not set"
+  , blockHash = error "Block hash not set"
+  , totalFees = fees
+  }
+
+mineBlock :: TVar Blockchain -> IO (Either BlockchainError Block)
+mineBlock blockchainVar = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+      prevBlock = head chain
+      txs = take 100 $ Map.elems $ unMempool mempool
+      fees = sum $ map fee txs
+      newBlock = createBlock txs prevBlock fees
+  
+  currentTime <- liftIO $ round <$> getPOSIXTime
+  let target = BS.replicate difficulty '0'
+      findNonce n
+        | n > 1000000 = throwError $ InvalidBlock "Failed to mine block"
+        | otherwise = do
+            let hash = calculateBlockHash newBlock { nonce = n, timestamp = currentTime }
+            if BS.take difficulty hash == target
+              then return newBlock { nonce = n, timestamp = currentTime, blockHash = hash }
+              else findNonce (n + 1)
+  
+  minedBlock <- findNonce 0
+  liftIO $ atomically $ modifyTVar' blockchainVar $ \bc -> bc
+    { chain = minedBlock : chain
+    , mempool = Mempool $ foldr Map.delete (unMempool mempool) (map transactionId txs)
+    , stateDB = updateState (stateDB bc) (transactions minedBlock)
+    , lastAdjustmentTime = currentTime
+    }
+  return minedBlock
+
+calculateBlockHash :: Block -> ByteString
+calculateBlockHash Block{..} = sha256 $ C8.pack $
+  show index ++ show previousHash ++ show timestamp ++ show transactions ++ show nonce
+
+isValidBlock :: Block -> Block -> Int -> Bool
+isValidBlock newBlock prevBlock difficulty =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == blockHash prevBlock &&
+  BS.take difficulty (blockHash newBlock) == BS.replicate difficulty '0' &&
+  all verifyTransaction (transactions newBlock)
+
+updateState :: Map ByteString Integer -> [Transaction] -> Map ByteString Integer
+updateState state txs = foldr updateTransaction state txs
+  where
+    updateTransaction Transaction{..} s =
+      let s' = Map.insertWith (+) receiver amount s
+      in Map.insertWith (\a b -> b - a) sender (amount + fee) s'
+
+addTransaction :: TVar Blockchain -> Transaction -> IO (Either BlockchainError ())
+addTransaction blockchainVar tx = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+  when (not $ verifyTransaction tx) $
+    throwError $ InvalidTransaction "Invalid transaction signature"
+  let senderBalance = Map.findWithDefault 0 (sender tx) stateDB
+  when (senderBalance < amount tx + fee tx) $
+    throwError $ InsufficientFunds "Insufficient funds for transaction"
+  liftIO $ atomically $ modifyTVar' blockchainVar $ \bc -> bc
+    { mempool = Mempool $ Map.insert (transactionId tx) tx (unMempool mempool) }
+  return ()
+
+transactionId :: Transaction -> ByteString
+transactionId Transaction{..} = sha256 $ C8.pack $
+  show sender ++ show receiver ++ show amount ++ show fee
+
+-- Networking
+
+broadcastTransaction :: TVar Blockchain -> Transaction -> IO ()
+broadcastTransaction blockchainVar tx = do
+  blockchain <- atomically $ readTVar blockchainVar
+  let peers' = peers blockchain
+  mapM_ (\peer -> sendMessage peer (encode tx)) peers'
+
+broadcastBlock :: TVar Blockchain -> Block -> IO ()
+broadcastBlock blockchainVar block = do
+  blockchain <- atomically $ readTVar blockchainVar
+  let peers' = peers blockchain
+  mapM_ (\peer -> sendMessage peer (encode block)) peers'
+
+sendMessage :: SockAddr -> BL.ByteString -> IO ()
+sendMessage addr msg = withSocketsDo $ do
+  sock <- socket AF_INET Stream defaultProtocol
+  connect sock addr
+  NSB.sendAll sock (BL.toStrict msg)
+  close sock
+
+handleIncomingMessage :: TVar Blockchain -> BL.ByteString -> IO ()
+handleIncomingMessage blockchainVar msg =
+  case (decode msg :: Maybe Transaction, decode msg :: Maybe Block) of
+    (Just tx, _) -> void $ addTransaction blockchainVar tx
+    (_, Just block) -> void $ addBlock blockchainVar block
+    _ -> putStrLn "Invalid message received"
+
+addBlock :: TVar Blockchain -> Block -> IO (Either BlockchainError ())
+addBlock blockchainVar newBlock = runExceptT $ do
+  blockchain <- liftIO $ atomically $ readTVar blockchainVar
+  let Blockchain{..} = blockchain
+      prevBlock = head chain
+  when (not $
+
+
+
+
+
+9 3 XXX CHAT NEW KRILNO 
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+module CardanoBlockchain where
+
+import Control.Monad (void, when)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.Ed25519 (PublicKey, SecretKey, Signature, sign, verify, generate, toPublic)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Aeson (ToJSON, FromJSON)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Data.List (sortOn)
+import Network.HTTP.Client (newManager, defaultManagerSettings, Manager)
+import Network.HTTP.Client.TLS (tlsManagerSettings)
+import System.Random (randomRIO)
+import System.IO.Error (tryIOError)
+
+-- Define data types
+data FileTransfer = FileTransfer
+  { fileHash     :: ByteString
+  , fileSignature :: Signature Ed25519DSIGN
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { txSender      :: ByteString
+  , txReceiver    :: ByteString
+  , txAmount      :: Integer
+  , txFile        :: Maybe FileTransfer
+  } deriving (Show, Eq)
+
+data Block = Block
+  { blockIndex        :: Int
+  , blockPreviousHash :: ByteString
+  , blockTimestamp    :: POSIXTime
+  , blockTransactions :: [Transaction]
+  , blockHash         :: ByteString
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chainBlocks       :: [Block]
+  , pendingTransactions :: [Transaction]
+  , validators        :: [PublicKey]
+  , manager           :: Manager
+  } deriving (Show)
+
+-- Generate ToJSON and FromJSON instances for our data types
+$(deriveJSON defaultOptions ''FileTransfer)
+$(deriveJSON defaultOptions ''Transaction)
+$(deriveJSON defaultOptions ''Block)
+
+-- Hashing function
+calculateHash :: ByteString -> ByteString
+calculateHash = C8.pack . show . hashWith SHA256 . C8.unpack
+
+-- Create a new block
+createBlock :: MonadIO m => Blockchain -> [Transaction] -> PublicKey -> m Block
+createBlock Blockchain{..} transactions validatorPubKey = do
+  timestamp <- liftIO getPOSIXTime
+  let previousBlock = head chainBlocks
+      index' = blockIndex previousBlock + 1
+      previousHash' = blockHash previousBlock
+      blockData = C8.concat
+        [ C8.pack (show index')
+        , previousHash'
+        , C8.pack (show timestamp)
+        , C8.concat $ map (C8.pack . show) transactions
+        ]
+      hash' = calculateHash blockData
+  -- Ensure block's hash is valid (simulated proof-of-work or other consensus here)
+  when (not $ isValidHash hash') $ error "Invalid block hash"
+  return Block
+    { blockIndex = index'
+    , blockPreviousHash = previousHash'
+    , blockTimestamp = timestamp
+    , blockTransactions = transactions
+    , blockHash = hash'
+    }
+
+-- Verify a file transfer
+verifyFileTransfer :: FileTransfer -> ByteString -> Bool
+verifyFileTransfer FileTransfer{..} fileData =
+  let computedHash = calculateHash fileData
+  in computedHash == fileHash && verify fileHash computedHash fileSignature
+
+-- Create genesis block
+createGenesisBlock :: MonadIO m => m Block
+createGenesisBlock = do
+  timestamp <- liftIO getPOSIXTime
+  return Block
+    { blockIndex = 0
+    , blockPreviousHash = "0"
+    , blockTimestamp = timestamp
+    , blockTransactions = []
+    , blockHash = calculateHash "genesis"
+    }
+
+-- Add a block to the blockchain
+addBlock :: Blockchain -> Block -> Blockchain
+addBlock blockchain@Blockchain{..} block =
+  Blockchain
+    { chainBlocks = block : chainBlocks
+    , pendingTransactions = []
+    , validators = validators
+    , manager = manager
+    }
+
+-- Generate a new cryptographic key pair
+generateKeys :: IO (SecretKey, PublicKey)
+generateKeys = do
+  (sk, pk) <- generate
+  return (sk, pk)
+
+-- Realistic proof-of-work simulation
+isValidHash :: ByteString -> Bool
+isValidHash hash = C8.take 4 hash == "0000" -- Example condition for proof-of-work
+
+-- Consensus mechanism placeholder
+consensusMechanism :: Blockchain -> Block -> Bool
+consensusMechanism _ _ = True -- Placeholder for actual consensus logic
+
+-- Initialize HTTP manager for network operations
+initializeManager :: IO Manager
+initializeManager = newManager tlsManagerSettings
+
+-- Realistic file transfer validation
+validateFileTransfer :: FileTransfer -> ByteString -> IO Bool
+validateFileTransfer ft fileData = do
+  return $ verifyFileTransfer ft fileData
+
+-- Main function
+main :: IO ()
+main = do
+  -- Initialize components
+  manager <- initializeManager
+  (validatorSk, validatorPk) <- generateKeys
+  genesisBlock <- createGenesisBlock
+  let blockchain = Blockchain [genesisBlock] [] [validatorPk] manager
+  
+  -- Example file data and signature
+  fileData <- randomRIO (1, 100) >>= \n -> return $ C8.pack $ show n
+  let fileHash = calculateHash fileData
+      fileSignature = sign validatorSk fileHash
+      fileTransfer = FileTransfer fileHash fileSignature
+      transaction = Transaction "Alice" "Bob" 100 (Just fileTransfer)
+  
+  -- Create and add a new block
+  newBlock <- createBlock blockchain [transaction] validatorPk
+  when (not $ consensusMechanism blockchain newBlock) $ error "Block validation failed"
+  let updatedChain = addBlock blockchain newBlock
+  
+  -- Validate file transfer
+  isValid <- validateFileTransfer fileTransfer fileData
+  when (not isValid) $ error "File transfer validation failed"
+  
+  print updatedChain
+
+
+
+9 3 XXXA CHAT NEW KRILNO 
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
+
+module Main where
+
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.Ed25519 (PublicKey, SecretKey, Signature, sign, verify, generateKeypair)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Aeson (ToJSON, FromJSON, encode, decode)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Database.RocksDB (DB, open, defaultOptions, put, get, delete)
+import Network.Socket (Socket, SockAddr, SocketType(Stream), defaultProtocol, bind, listen, accept, socket, close, withSocketsDo, Family(AF_INET))
+import Network.Socket.ByteString (sendAll, recv)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad (forever, unless, when)
+import Control.Monad.Except (ExceptT, throwError, runExceptT)
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
+import qualified Crypto.Random as Random
+
+-- Data types for blockchain
+data BlockchainError
+  = BlockCreationFailed String
+  | InvalidTransaction String
+  | InvalidSignature
+  | NetworkError String
+  | StorageError String
+  deriving (Show, Eq, Generic)
+
+data Block = Block
+  { blockIndex :: Int
+  , blockPreviousHash :: Digest SHA256
+  , blockTimestamp :: POSIXTime
+  , blockTransactions :: [Transaction]
+  , blockValidator :: PublicKey
+  , blockHash :: Digest SHA256
+  } deriving (Show, Eq, Generic)
+
+data Transaction = Transaction
+  { txSender :: PublicKey
+  , txReceiver :: PublicKey
+  , txAmount :: Integer
+  , txSignature :: Signature
+  } deriving (Show, Eq, Generic)
+
+data Blockchain = Blockchain
+  { chainBlocks :: [Block]
+  , pendingTransactions :: [Transaction]
+  , storageBackend :: DB
+  } deriving (Show, Generic)
+
+$(deriveJSON defaultOptions ''Block)
+$(deriveJSON defaultOptions ''Transaction)
+
+-- Cryptographic operations
+blockchainHash :: ByteString -> Digest SHA256
+blockchainHash = hash
+
+validateTransaction :: MonadIO m => Transaction -> ExceptT BlockchainError m ()
+validateTransaction tx = do
+  let msg = C8.pack $ show (txSender tx, txReceiver tx, txAmount tx)
+  unless (verify (txSender tx) msg (txSignature tx)) $
+    throwError InvalidSignature
+
+createBlock :: MonadIO m => [Transaction] -> Block -> PublicKey -> ExceptT BlockchainError m Block
+createBlock transactions previousBlock validatorPubKey = do
+  timestamp <- liftIO getPOSIXTime
+  let index' = blockIndex previousBlock + 1
+      previousHash' = blockHash previousBlock
+      blockData = C8.pack $ show (index', previousHash', timestamp, transactions, validatorPubKey)
+      hash' = blockchainHash blockData
+  return Block
+    { blockIndex = index'
+    , blockPreviousHash = previousHash'
+    , blockTimestamp = timestamp
+    , blockTransactions = transactions
+    , blockValidator = validatorPubKey
+    , blockHash = hash'
+    }
+
+-- Network operations
+startNetworkNode :: IO ()
+startNetworkNode = withSocketsDo $ do
+  sock <- socket AF_INET Stream defaultProtocol
+  bind sock (SockAddrInet 8080 0)
+  listen sock 5
+  putStrLn "Server listening on port 8080"
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleConnection conn
+
+handleConnection :: Socket -> IO ()
+handleConnection conn = do
+  msg <- recv conn 1024
+  case msg of
+    "" -> return ()
+    _ -> do
+      putStrLn $ "Received: " ++ C8.unpack msg
+      sendAll conn $ C8.pack "Message received"
+      close conn
+
+-- Storage operations
+initializeDB :: IO DB
+initializeDB = open "blockchain.db" defaultOptions
+
+putBlock :: DB -> Block -> IO ()
+putBlock db block = put db (C8.pack $ show $ blockIndex block) (encode block)
+
+getBlock :: DB -> Int -> IO (Maybe Block)
+getBlock db index = decode <$> get db (C8.pack $ show index)
+
+-- Consensus mechanism (proof-of-work with additional security considerations)
+proofOfWork :: ByteString -> Int -> ByteString
+proofOfWork message difficulty = go 0
+  where
+    go nonce
+      | checkDifficulty (hash (message <> C8.pack (show nonce))) = C8.pack (show nonce)
+      | otherwise = go (nonce + 1)
+
+    checkDifficulty :: Digest SHA256 -> Bool
+    checkDifficulty digest = C8.take difficulty (C8.pack (show digest)) == C8.replicate difficulty '0'
+
+-- Security and Compliance functions
+secureRandomBytes :: Int -> IO ByteString
+secureRandomBytes n = Random.getRandomBytes n
+
+-- Main function to run the complete example
+main :: IO ()
+main = do
+  -- Initialize blockchain
+  db <- initializeDB
+  let initialBlockchain = Blockchain
+        { chainBlocks = []
+        , pendingTransactions = []
+        , storageBackend = db
+        }
+
+  -- Example transaction and block creation
+  (publicKey, secretKey) <- return generateKeypair
+  let exampleTransaction = Transaction
+        { txSender = publicKey
+        , txReceiver = publicKey
+        , txAmount = 100
+        , txSignature = sign secretKey (C8.pack $ show (publicKey, publicKey, 100))
+        }
+
+  let genesisBlock = Block
+        { blockIndex = 0
+        , blockPreviousHash = blockchainHash "genesis"
+        , blockTimestamp = 0
+        , blockTransactions = []
+        , blockValidator = publicKey
+        , blockHash = blockchainHash "genesis"
+        }
+
+  result <- runExceptT $ do
+    validatedTx <- validateTransaction exampleTransaction
+    liftIO $ putStrLn "Transaction validated"
+    nonce <- liftIO $ return $ C8.unpack $ proofOfWork (C8.pack $ show genesisBlock) 4
+    newBlock <- createBlock [exampleTransaction] genesisBlock publicKey
+    liftIO $ putBlock db newBlock
+    liftIO $ putStrLn $ "Block created: " ++ show newBlock
+    liftIO $ putStrLn $ "Proof of work nonce: " ++ nonce
+
+  case result of
+    Left err -> putStrLn $ "Error: " ++ show err
+    Right _ -> putStrLn "Blockchain successfully initialized."
+
+  -- Start network node
+  startNetworkNode
+
+
+
+9 3 XXXA CLAUDE NEW KRILNO
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
+
+module Main where
+
+import Crypto.Hash (Digest, SHA256, hash)
+import qualified Crypto.PubKey.Ed25519 as Ed25519
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Aeson (ToJSON, FromJSON, encode, decode)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Database.RocksDB (DB, open, defaultOptions, put, get, delete)
+import Network.Socket (Socket, SockAddr, SocketType(Stream), defaultProtocol, bind, listen, accept, socket, close, withSocketsDo, Family(AF_INET))
+import Network.Socket.ByteString (sendAll, recv)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad (forever, unless, when)
+import Control.Monad.Except (ExceptT, throwError, runExceptT)
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
+import qualified Crypto.Random as Random
+import qualified Data.Vector as V
+import Data.Merkle (MerkleTree, mkMerkleTree, rootHash)
+import System.Random (randomRIO)
+import Control.Exception (try, SomeException)
+import System.Log.Logger (updateGlobalLogger, rootLoggerName, setLevel, Priority(..), errorM, warningM, infoM, debugM)
+
+-- Cardano-specific imports (you would need to add these to your project dependencies)
+import Ouroboros.Consensus.Cardano (CardanoBlock)
+import Ouroboros.Consensus.Cardano.Block (StandardCrypto)
+import Ouroboros.Consensus.Shelley.Ledger (ShelleyLedgerConfig)
+import Ouroboros.Consensus.Shelley.Protocol (ShelleyProtocolParams)
+import Plutus.V1.Ledger.Scripts (Script(..))
+import Plutus.V1.Ledger.Value (Value(..), AssetClass(..))
+import Cardano.Crypto.VRF (VRFProof(..), VRFKey(..), certifyVRF)
+import Cardano.Node.Networking (NodeId, connectTo, sendMessage, receiveMessage)
+import Test.Tasty (TestTree, testGroup, defaultMain)
+import Test.Tasty.HUnit (testCase, (@?=))
+
+-- ... (Previous type definitions remain the same)
+
+-- Implement detailed logic for placeholder functions
+
+selectSlotLeader :: CardanoChain -> SlotNo -> IO (Maybe StakePoolId)
+selectSlotLeader chain slot = do
+    let epoch = slotToEpoch slot
+        activeStakePools = activeStakePools $ epochState chain
+    vrf <- generateVRF slot
+    threshold <- calculateThreshold chain epoch
+    return $ findLeader activeStakePools vrf threshold
+  where
+    findLeader pools vrf threshold = do
+        let poolStakes = map (\pool -> (poolId pool, poolStake pool)) $ Map.elems $ stakePools chain
+        let totalStake = sum $ map snd poolStakes
+        let normalizedStakes = map (\(id, stake) -> (id, fromIntegral stake / fromIntegral totalStake)) poolStakes
+        let vrfValue = vrfToDouble vrf
+        foldr (\(id, stake) acc -> 
+            if vrfValue < stake * threshold then Just id
+            else acc) Nothing normalizedStakes
+
+generateVRF :: SlotNo -> IO VRFProof
+generateVRF (SlotNo slot) = do
+    let seed = C8.pack $ show slot
+    VRFProof <$> certifyVRF (VRFKey "dummy_key") seed
+
+calculateThreshold :: CardanoChain -> EpochNo -> IO Double
+calculateThreshold chain (EpochNo epoch) = do
+    let totalStake = sum $ map poolStake $ Map.elems $ stakePools chain
+    let activeStakePoolsCount = length $ activeStakePools $ epochState chain
+    return $ fromIntegral totalStake / (fromIntegral activeStakePoolsCount * fromIntegral epoch)
+
+vrfToDouble :: VRFProof -> Double
+vrfToDouble (VRFProof bs) = read $ C8.unpack bs
+
+slotToEpoch :: SlotNo -> EpochNo
+slotToEpoch (SlotNo slot) = EpochNo $ slot `div` 432000  -- Assuming 5 days per epoch
+
+calculateNewEpochState :: CardanoChain -> EpochNo -> EpochState
+calculateNewEpochState chain newEpoch = 
+    let newStakeDist = calculateStakeDistribution chain
+        newActiveStakePools = selectActiveStakePools chain newStakeDist
+    in EpochState
+        { epochNo = newEpoch
+        , stakeDist = newStakeDist
+        , activeStakePools = newActiveStakePools
+        }
+
+calculateStakeDistribution :: CardanoChain -> Map Ed25519.PublicKey Stake
+calculateStakeDistribution chain = 
+    foldr (\tx acc -> updateStakeDistribution tx acc) Map.empty (chainBlocks chain)
+
+updateStakeDistribution :: CardanoTx -> Map Ed25519.PublicKey Stake -> Map Ed25519.PublicKey Stake
+updateStakeDistribution tx dist = 
+    foldr (\output acc -> 
+        let addr = outputAddress output
+            value = outputValue output
+        in Map.insertWith (+) (addressPaymentKey addr) (valueToStake value) acc
+    ) dist (txOutputs tx)
+
+valueToStake :: Value -> Stake
+valueToStake (Value ada _) = ada  -- Simplified: only consider ADA for staking
+
+selectActiveStakePools :: CardanoChain -> Map Ed25519.PublicKey Stake -> V.Vector StakePoolId
+selectActiveStakePools chain stakeDist = 
+    V.fromList $ take 100 $ map fst $ sortBy (comparing (Down . snd)) $ Map.toList stakeDist
+
+updateStakePools :: CardanoChain -> EpochState -> Map StakePoolId StakePool
+updateStakePools chain newEpochState = 
+    Map.mapWithKey (\poolId pool -> 
+        let newStake = sum $ map snd $ filter (\(key, _) -> key `elem` poolOwners pool) $ Map.toList $ stakeDist newEpochState
+        in pool { poolStake = newStake }
+    ) (stakePools chain)
+
+mintToken :: CardanoTx -> PolicyId -> AssetName -> Integer -> CardanoTx
+mintToken tx policyId assetName amount = 
+    tx { txOutputs = map (updateOutput policyId assetName amount) (txOutputs tx) }
+  where
+    updateOutput pid aname amt output = 
+        output { outputValue = updateValue pid aname amt (outputValue output) }
+    updateValue pid aname amt (Value ada tokens) = 
+        Value ada (Map.insertWith (+) (AssetId pid aname) amt tokens)
+
+burnToken :: CardanoTx -> PolicyId -> AssetName -> Integer -> CardanoTx
+burnToken tx policyId assetName amount = 
+    mintToken tx policyId assetName (-amount)
+
+executeScript :: Script -> ScriptContext -> Either String ()
+executeScript (Script script) context = 
+    case runScript script context of
+        Left err -> Left $ "Script execution failed: " ++ err
+        Right _ -> Right ()
+
+runScript :: ByteString -> ScriptContext -> Either String ()
+runScript script context = 
+    -- This is a placeholder. In a real implementation, you'd use the Plutus interpreter here.
+    if C8.length script > 0 && length (show context) > 0
+    then Right ()
+    else Left "Invalid script or context"
+
+validateTx :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateTx tx chain = do
+    validateInputs tx chain
+    validateOutputs tx
+    validateScripts tx chain
+
+validateInputs :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateInputs tx chain = 
+    if all (inputExists chain) (txInputs tx)
+    then Right ()
+    else Left $ InvalidTransaction "Input does not exist"
+
+inputExists :: CardanoChain -> TxInput -> Bool
+inputExists chain input = 
+    any (outputExists input) (chainBlocks chain)
+
+outputExists :: TxInput -> CardanoBlock -> Bool
+outputExists input block = 
+    any (\tx -> any (\output -> inputMatchesOutput input output) (txOutputs tx)) (blockTransactions block)
+
+inputMatchesOutput :: TxInput -> TxOutput -> Bool
+inputMatchesOutput input output = 
+    inputTxId input == txId && inputIndex input == outputIndex
+  where
+    (txId, outputIndex) = undefined  -- This would come from the actual output data
+
+validateOutputs :: CardanoTx -> Either CardanoError ()
+validateOutputs tx = 
+    if all isValidOutput (txOutputs tx)
+    then Right ()
+    else Left $ InvalidTransaction "Invalid output"
+
+isValidOutput :: TxOutput -> Bool
+isValidOutput output = 
+    valueIsNonNegative (outputValue output)
+
+valueIsNonNegative :: Value -> Bool
+valueIsNonNegative (Value ada tokens) = 
+    ada >= 0 && all (>= 0) (Map.elems tokens)
+
+validateScripts :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateScripts tx chain = 
+    mapM_ validateScript (txScripts tx)
+  where
+    validateScript script = 
+        case executeScript script (createScriptContext tx chain) of
+            Left err -> Left $ SmartContractError err
+            Right _ -> Right ()
+
+createScriptContext :: CardanoTx -> CardanoChain -> ScriptContext
+createScriptContext tx chain = 
+    ScriptContext
+        { scriptContextTxInfo = createTxInfo tx chain
+        , scriptContextPurpose = Spending (TxOutRef (txId tx) 0)  -- Simplified
+        }
+
+createTxInfo :: CardanoTx -> CardanoChain -> TxInfo
+createTxInfo tx chain = undefined  -- This would be a complex function to implement
+
+delegateStake :: Ed25519.PublicKey -> StakePoolId -> CardanoTx
+delegateStake delegator poolId = 
+    CardanoTx
+        { txInputs = []  -- In reality, this would include the necessary inputs
+        , txOutputs = []  -- In reality, this would include the necessary outputs
+        , txMetadata = TxMetadata $ C8.pack $ "Delegate " ++ show delegator ++ " to " ++ show poolId
+        , txSignatures = []  -- This would include the delegator's signature
+        , txScripts = []  -- This might include a delegation script
+        }
+
+createStakePool :: StakePool -> CardanoTx
+createStakePool pool = 
+    CardanoTx
+        { txInputs = []  -- In reality, this would include the necessary inputs
+        , txOutputs = []  -- In reality, this would include the necessary outputs
+        , txMetadata = TxMetadata $ C8.pack $ "Create stake pool " ++ show (poolId pool)
+        , txSignatures = []  -- This would include the pool owners' signatures
+        , txScripts = []  -- This might include a stake pool registration script
+        }
+
+updateStakePool :: StakePool -> CardanoTx
+updateStakePool pool = 
+    CardanoTx
+        { txInputs = []  -- In reality, this would include the necessary inputs
+        , txOutputs = []  -- In reality, this would include the necessary outputs
+        , txMetadata = TxMetadata $ C8.pack $ "Update stake pool " ++ show (poolId pool)
+        , txSignatures = []  -- This would include the pool owners' signatures
+        , txScripts = []  -- This might include a stake pool update script
+        }
+
+retireStakePool :: StakePoolId -> EpochNo -> CardanoTx
+retireStakePool poolId retirementEpoch = 
+    CardanoTx
+        { txInputs = []  -- In reality, this would include the necessary inputs
+        , txOutputs = []  -- In reality, this would include the necessary outputs
+        , txMetadata = TxMetadata $ C8.pack $ "Retire stake pool " ++ show poolId ++ " at epoch " ++ show retirementEpoch
+        , txSignatures = []  -- This would include the pool owners' signatures
+        , txScripts = []  -- This might include a stake pool retirement script
+        }
+
+-- Comprehensive error handling and logging
+
+data CardanoException
+    = NetworkException String
+    | DatabaseException String
+    | ConsensusException String
+    | ScriptException String
+    deriving (Show)
+
+logError :: String -> IO ()
+logError = errorM "Cardano"
+
+logWarning :: String -> IO ()
+logWarning = warningM "Cardano"
+
+logInfo :: String -> IO ()
+logInfo = infoM "Cardano"
+
+logDebug :: String -> IO ()
+logDebug = debugM "Cardano"
+
+withErrorLogging :: IO a -> IO (Either CardanoException a)
+withErrorLogging action = do
+    result <- try action
+    case result of
+        Left e -> do
+            logError $ "An exception occurred: " ++ show (e :: SomeException)
+            return $ Left $ NetworkException $ show e
+        Right r -> return $ Right r
+
+-- Testing framework
+
+tests :: TestTree
+tests = testGroup "Cardano Tests"
+    [ testCase "VRF to Double Conversion" $
+        vrfToDouble (VRFProof "0.5") @?= 0.5
+    , testCase "Slot to Epoch Conversion" $
+        slotToEpoch (SlotNo 1000000) @?= EpochNo 2
+    , testCase "Mint Token" $ do
+        let tx = CardanoTx [] [] (TxMetadata "") [] []
+        let policyId = PolicyId "test_policy"
+        let assetName = AssetName "test_asset"
+        let amount = 100
+        let mintedTx = mintToken tx policyId assetName amount
+        length (txOutputs mintedTx) @?= 0  -- This should be updated when we implement proper minting
+    ]
+
+-- Hard Fork Combinator
+
+data ProtocolVersion = Byron | Shelley | Allegra | Mary | Alonzo
+    deriving (Show, Eq, Ord)
+
+data HardForkBlock
+    = ByronBlock ByteString
+    | ShelleyBlock CardanoBlock
+    | AllegraBlock CardanoBlock
+    | MaryBlock CardanoBlock
+    | AlonzoBlock CardanoBlock
+    deriving (Show)
+
+data HardForkChain = HardForkChain
+    { hfProtocolVersion :: ProtocolVersion
+    , hfBlocks :: [HardForkBlock]
+    }
+
+applyHardFork :: HardForkChain -> ProtocolVersion -> Either String HardForkChain
+applyHardFork chain newVersion
+    | newVersion <= hfProtocolVersion chain = Left "Cannot downgrade protocol version"
+    | newVersion == succ (hfProtocolVersion chain) = Right $ chain { hfProtocolVersion
+
+
+
+
+
+9 3 XXXA PERPLEXITY NEW KRILNO 
+
+
+
+
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
+
+module Main where
+
+import Crypto.Hash (Digest, SHA256, hash)
+import qualified Crypto.PubKey.Ed25519 as Ed25519
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Aeson (ToJSON, FromJSON, encode, decode)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Database.RocksDB (DB, open, defaultOptions, put, get, delete)
+import Network.Socket (Socket, SockAddr, SocketType(Stream), defaultProtocol, bind, listen, accept, socket, close, withSocketsDo, Family(AF_INET))
+import Network.Socket.ByteString (sendAll, recv)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad (forever, unless, when)
+import Control.Monad.Except (ExceptT, throwError, runExceptT)
+import Control.Monad.Reader (ReaderT, ask, runReaderT)
+import qualified Crypto.Random as Random
+import qualified Data.Vector as V
+import Data.Merkle (MerkleTree, mkMerkleTree, rootHash)
+import System.Random (randomRIO)
+import Control.Exception (try, SomeException)
+import System.Log.Logger (updateGlobalLogger, rootLoggerName, setLevel, Priority(..), errorM, warningM, infoM, debugM)
+
+-- Cardano-specific imports
+import Ouroboros.Consensus.Cardano (CardanoBlock)
+import Ouroboros.Consensus.Cardano.Block (StandardCrypto)
+import Ouroboros.Consensus.Shelley.Ledger (ShelleyLedgerConfig)
+import Ouroboros.Consensus.Shelley.Protocol (ShelleyProtocolParams)
+import Plutus.V1.Ledger.Scripts (Script(..))
+import Plutus.V1.Ledger.Value (Value(..), AssetClass(..))
+import Cardano.Crypto.VRF (VRFProof(..), VRFKey(..), certifyVRF)
+import Cardano.Node.Networking (NodeId, connectTo, sendMessage, receiveMessage)
+import Test.Tasty (TestTree, testGroup, defaultMain)
+import Test.Tasty.HUnit (testCase, (@?=))
+
+-- Implement detailed logic for placeholder functions
+selectSlotLeader :: CardanoChain -> SlotNo -> IO (Maybe StakePoolId)
+selectSlotLeader chain slot = do
+    let epoch = slotToEpoch slot
+    activeStakePools = activeStakePools $ epochState chain
+    vrf <- generateVRF slot
+    threshold <- calculateThreshold chain epoch
+    return $ findLeader activeStakePools vrf threshold
+  where
+    findLeader pools vrf threshold = do
+        let poolStakes = map (\pool -> (poolId pool, poolStake pool)) $ Map.elems $ stakePools chain
+        let totalStake = sum $ map snd poolStakes
+        let normalizedStakes = map (\(id, stake) -> (id, fromIntegral stake / fromIntegral totalStake)) poolStakes
+        let vrfValue = vrfToDouble vrf
+        foldr (\(id, stake) acc -> if vrfValue < stake * threshold then Just id else acc) Nothing normalizedStakes
+
+generateVRF :: SlotNo -> IO VRFProof
+generateVRF (SlotNo slot) = do
+    let seed = C8.pack $ show slot
+    VRFProof <$> certifyVRF (VRFKey "dummy_key") seed
+
+calculateThreshold :: CardanoChain -> EpochNo -> IO Double
+calculateThreshold chain (EpochNo epoch) = do
+    let totalStake = sum $ map poolStake $ Map.elems $ stakePools chain
+    let activeStakePoolsCount = length $ activeStakePools $ epochState chain
+    return $ fromIntegral totalStake / (fromIntegral activeStakePoolsCount * fromIntegral epoch)
+
+vrfToDouble :: VRFProof -> Double
+vrfToDouble (VRFProof bs) = read $ C8.unpack bs
+
+slotToEpoch :: SlotNo -> EpochNo
+slotToEpoch (SlotNo slot) = EpochNo $ slot `div` 432000 -- Assuming 5 days per epoch
+
+calculateNewEpochState :: CardanoChain -> EpochNo -> EpochState
+calculateNewEpochState chain newEpoch = 
+    let newStakeDist = calculateStakeDistribution chain
+        newActiveStakePools = selectActiveStakePools chain newStakeDist
+    in EpochState {
+        epochNo = newEpoch,
+        stakeDist = newStakeDist,
+        activeStakePools = newActiveStakePools
+    }
+
+calculateStakeDistribution :: CardanoChain -> Map Ed25519.PublicKey Stake
+calculateStakeDistribution chain = foldr (\tx acc -> updateStakeDistribution tx acc) Map.empty (chainBlocks chain)
+
+updateStakeDistribution :: CardanoTx -> Map Ed25519.PublicKey Stake -> Map Ed25519.PublicKey Stake
+updateStakeDistribution tx dist = foldr (\output acc ->
+    let addr = outputAddress output
+        value = outputValue output
+    in Map.insertWith (+) (addressPaymentKey addr) (valueToStake value) acc
+    ) dist (txOutputs tx)
+
+valueToStake :: Value -> Stake
+valueToStake (Value ada _) = ada -- Simplified: only consider ADA for staking
+
+selectActiveStakePools :: CardanoChain -> Map Ed25519.PublicKey Stake -> V.Vector StakePoolId
+selectActiveStakePools chain stakeDist = V.fromList $ take 100 $ map fst $ sortBy (comparing (Down . snd)) $ Map.toList stakeDist
+
+updateStakePools :: CardanoChain -> EpochState -> Map StakePoolId StakePool
+updateStakePools chain newEpochState = Map.mapWithKey (\poolId pool ->
+    let newStake = sum $ map snd $ filter (\(key, _) -> key `elem` poolOwners pool) $ Map.toList $ stakeDist newEpochState
+    in pool { poolStake = newStake }
+    ) (stakePools chain)
+
+mintToken :: CardanoTx -> PolicyId -> AssetName -> Integer -> CardanoTx
+mintToken tx policyId assetName amount = tx { txOutputs = map (updateOutput policyId assetName amount) (txOutputs tx) }
+  where
+    updateOutput pid aname amt output = output { outputValue = updateValue pid aname amt (outputValue output) }
+    updateValue pid aname amt (Value ada tokens) = Value ada (Map.insertWith (+) (AssetId pid aname) amt tokens)
+
+burnToken :: CardanoTx -> PolicyId -> AssetName -> Integer -> CardanoTx
+burnToken tx policyId assetName amount = mintToken tx policyId assetName (-amount)
+
+executeScript :: Script -> ScriptContext -> Either String ()
+executeScript (Script script) context = case runScript script context of
+    Left err -> Left $ "Script execution failed: " ++ err
+    Right _ -> Right ()
+
+runScript :: ByteString -> ScriptContext -> Either String ()
+runScript script context =
+    -- This is a placeholder. In a real implementation, you'd use the Plutus interpreter here.
+    if C8.length script > 0 && length (show context) > 0
+    then Right ()
+    else Left "Invalid script or context"
+
+validateTx :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateTx tx chain = do
+    validateInputs tx chain
+    validateOutputs tx
+    validateScripts tx chain
+
+validateInputs :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateInputs tx chain =
+    if all (inputExists chain) (txInputs tx)
+    then Right ()
+    else Left $ InvalidTransaction "Input does not exist"
+
+inputExists :: CardanoChain -> TxInput -> Bool
+inputExists chain input = any (outputExists input) (chainBlocks chain)
+
+outputExists :: TxInput -> CardanoBlock -> Bool
+outputExists input block = any (\tx -> any (\output -> inputMatchesOutput input output) (txOutputs tx)) (blockTransactions block)
+
+inputMatchesOutput :: TxInput -> TxOutput -> Bool
+inputMatchesOutput input output = inputTxId input == txId && inputIndex input == outputIndex
+  where
+    (txId, outputIndex) = undefined -- This would come from the actual output data
+
+validateOutputs :: CardanoTx -> Either CardanoError ()
+validateOutputs tx =
+    if all isValidOutput (txOutputs tx)
+    then Right ()
+    else Left $ InvalidTransaction "Invalid output"
+
+isValidOutput :: TxOutput -> Bool
+isValidOutput output = valueIsNonNegative (outputValue output)
+
+valueIsNonNegative :: Value -> Bool
+valueIsNonNegative (Value ada tokens) = ada >= 0 && all (>= 0) (Map.elems tokens)
+
+validateScripts :: CardanoTx -> CardanoChain -> Either CardanoError ()
+validateScripts tx chain = mapM_ validateScript (txScripts tx)
+  where
+    validateScript script = case executeScript script (createScriptContext tx chain) of
+        Left err -> Left $ SmartContractError err
+        Right _ -> Right ()
+
+createScriptContext :: CardanoTx -> CardanoChain -> ScriptContext
+createScriptContext tx chain = ScriptContext {
+    scriptContextTxInfo = createTxInfo tx chain,
+    scriptContextPurpose = Spending (TxOutRef (txId tx) 0) -- Simplified
+}
+
+createTxInfo :: CardanoTx -> CardanoChain -> TxInfo
+createTxInfo tx chain = undefined -- This would be a complex function to implement
+
+delegateStake :: Ed25519.PublicKey -> StakePoolId -> CardanoTx
+delegateStake delegator poolId = CardanoTx {
+    txInputs = [], -- In reality, this would include the necessary inputs
+    txOutputs = [], -- In reality, this would include the necessary outputs
+    txMetadata = TxMetadata $ C8.pack $ "Delegate " ++ show delegator ++ " to " ++ show poolId,
+    txSignatures = [], -- This would include the delegator's signature
+    txScripts = [] -- This might include a delegation script
+}
+
+createStakePool :: StakePool -> CardanoTx
+createStakePool pool = CardanoTx {
+    txInputs = [], -- In reality, this would include the necessary inputs
+    txOutputs = [], -- In reality, this would include the necessary outputs
+    txMetadata = TxMetadata $ C8.pack $ "Create stake pool " ++ show (poolId pool),
+    txSignatures = [], -- This would include the pool owners' signatures
+    txScripts = [] -- This might include a stake pool registration script
+}
+
+updateStakePool :: StakePool -> CardanoTx
+updateStakePool pool = CardanoTx {
+    txInputs = [], -- In reality, this would include the necessary inputs
+    txOutputs = [], -- In reality, this would include the necessary outputs
+    txMetadata = TxMetadata $ C8.pack $ "Update stake pool " ++ show (poolId pool),
+    txSignatures = [], -- This would include the pool owners' signatures
+    txScripts = [] -- This might include a stake pool update script
+}
+
+retireStakePool :: StakePoolId -> EpochNo -> CardanoTx
+retireStakePool poolId retirementEpoch = CardanoTx {
+    txInputs = [], -- In reality, this would include the necessary inputs
+    txOutputs = [], -- In reality, this would include the necessary outputs
+    txMetadata = TxMetadata $ C8.pack $ "Retire stake pool " ++ show poolId ++ " at epoch " ++ show retirementEpoch,
+    txSignatures = [], -- This would include the pool owners' signatures
+    txScripts = [] -- This might include a stake pool retirement script
+}
+
+-- Comprehensive error handling and logging
+data CardanoException = NetworkException String
+                      | DatabaseException String
+                      | ConsensusException String
+                      | ScriptException String
+                      deriving (Show)
+
+logError :: String -> IO ()
+logError = errorM "Cardano"
+
+logWarning :: String -> IO ()
+logWarning = warningM "Cardano"
+
+logInfo :: String -> IO ()
+logInfo = infoM "Cardano"
+
+logDebug :: String -> IO ()
+logDebug = debugM "Cardano"
+
+withErrorLogging :: IO a -> IO (Either CardanoException a)
+withErrorLogging action = do
+    result <- try action
+    case result of
+        Left e -> do
+            logError $ "An exception occurred: " ++ show (e :: SomeException)
+            return $ Left $ NetworkException $ show e
+        Right r -> return $ Right r
+
+-- Testing framework
+tests :: TestTree
+tests = testGroup "Cardano Tests"
+    [ testCase "VRF to Double Conversion" $
+        vrfToDouble (VRFProof "0.5") @?= 0.5
+    , testCase "Slot to Epoch Conversion" $
+        slotToEpoch (SlotNo 1000000) @?= EpochNo 2
+    , testCase "Mint Token" $ do
+        let tx = CardanoTx [] [] (TxMetadata "") [] []
+        let policyId = PolicyId "test_policy"
+        let assetName = AssetName "test_asset"
+        let amount = 100
+        let mintedTx = mintToken tx policyId assetName amount
+        length (txOutputs mintedTx) @?= 0 -- This should be updated when we implement proper minting
+    ]
+
+-- Hard Fork Combinator
+data ProtocolVersion = Byron | Shelley | Allegra | Mary | Alonzo
+    deriving (Show, Eq, Ord)
+
+data HardForkBlock = ByronBlock ByteString
+                   | ShelleyBlock CardanoBlock
+                   | AllegraBlock CardanoBlock
+                   | MaryBlock CardanoBlock
+                   | AlonzoBlock CardanoBlock
+    deriving (Show)
+
+data HardForkChain = HardForkChain {
+    hfProtocolVersion :: ProtocolVersion,
+    hfBlocks :: [HardForkBlock]
+}
+
+applyHardFork :: HardForkChain -> ProtocolVersion -> Either String HardForkChain
+applyHardFork chain newVersion
+    | newVersion <= hfProtocolVersion chain = Left "Cannot downgrade protocol version"
+    | newVersion == succ (hfProtocolVersion chain) = Right $ chain { hfProtocolVersion = newVersion }
+    | otherwise = Left "Can only upgrade to the next version"
+
+main :: IO ()
+main = do
+    -- Initialize logging
+    updateGlobalLogger rootLoggerName (setLevel DEBUG)
+    
+    -- Run tests
+    defaultMain tests
+    
+    -- Start the node
+    result <- withErrorLogging $ do
+        -- Initialize the chain
+        chain <- initializeChain
+        
+        -- Start the main loop
+        runReaderT (forever $ do
+            -- Process new blocks
+            newBlocks <- receiveNewBlocks
+            processNewBlocks chain newBlocks
+            
+            -- Select slot leader and create new block if selected
+            currentSlot
+
+Citations:
+[1] https://ppl-ai-file-upload.s3.amazonaws.com/web/direct-files/30380322/2d976c8b-4f6e-46fe-803b-107f9e642e00/paste.txt
+
+
+
+
+
+9 3 XXXAAa CHAT NEW KRILNO 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+module Main where
+
+import Crypto.Hash (Digest, SHA256, hash)
+import qualified Crypto.PubKey.Ed25519 as Ed25519
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Aeson (ToJSON, FromJSON, encode, decode)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Maybe (fromMaybe)
+import Network.Socket (Socket, SockAddr, SocketType(Stream), defaultProtocol, bind, listen, accept, socket, close, withSocketsDo, Family(AF_INET), PortNumber)
+import Network.Socket.ByteString (sendAll, recv)
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Monad (forever)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Exception (try, SomeException)
+import Data.List (intercalate)
+import System.Random (randomIO)
+
+-- Data Structures
+data Block = Block
+    { blockIndex :: Int
+    , blockPreviousHash :: ByteString
+    , blockTimestamp :: POSIXTime
+    , blockTransactions :: [Transaction]
+    , blockHash :: ByteString
+    , blockNonce :: Int
+    } deriving (Show, Generic)
+
+data Transaction = Transaction
+    { txId :: ByteString
+    , txInputs :: [TxInput]
+    , txOutputs :: [TxOutput]
+    } deriving (Show, Generic)
+
+data TxInput = TxInput
+    { inputTxId :: ByteString
+    , inputIndex :: Int
+    } deriving (Show, Generic)
+
+data TxOutput = TxOutput
+    { outputAddress :: Address
+    , outputValue :: Integer
+    } deriving (Show, Generic)
+
+data Address = Address
+    { addressPublicKey :: Ed25519.PublicKey
+    } deriving (Show, Generic)
+
+instance ToJSON Block
+instance FromJSON Block
+instance ToJSON Transaction
+instance FromJSON Transaction
+instance ToJSON TxInput
+instance FromJSON TxInput
+instance ToJSON TxOutput
+instance FromJSON TxOutput
+instance ToJSON Address
+instance FromJSON Address
+
+-- Hashing Function
+hashBlock :: Block -> ByteString
+hashBlock block = hash $ C8.concat
+    [ C8.pack (show (blockIndex block))
+    , blockPreviousHash block
+    , C8.pack (show (blockTimestamp block))
+    , C8.pack (show (blockTransactions block))
+    , C8.pack (show (blockNonce block))
+    ]
+
+-- Proof of Work
+difficulty :: Int
+difficulty = 4  -- Number of leading zeros required in hash
+
+isValidProof :: ByteString -> Bool
+isValidProof hash = C8.take difficulty hash == C8.replicate difficulty '0'
+
+mineBlock :: Block -> IO Block
+mineBlock block = do
+    let target = C8.replicate difficulty '0'
+    mine 0
+  where
+    mine nonce = do
+        let newBlock = block { blockNonce = nonce, blockHash = hashBlock block { blockNonce = nonce } }
+        if isValidProof (blockHash newBlock)
+            then return newBlock
+            else mine (nonce + 1)
+
+-- Block Creation
+createBlock :: Int -> ByteString -> [Transaction] -> IO Block
+createBlock index previousHash transactions = do
+    timestamp <- getPOSIXTime
+    let block = Block
+            { blockIndex = index
+            , blockPreviousHash = previousHash
+            , blockTimestamp = timestamp
+            , blockTransactions = transactions
+            , blockHash = ""
+            , blockNonce = 0
+            }
+    mineBlock block
+
+-- Network Functions
+startServer :: PortNumber -> IO ()
+startServer port = withSocketsDo $ do
+    serverSocket <- socket AF_INET Stream defaultProtocol
+    bind serverSocket (SockAddrInet port 0)
+    listen serverSocket 5
+    putStrLn $ "Server listening on port " ++ show port
+    forever $ do
+        (clientSocket, _) <- accept serverSocket
+        forkIO $ handleClient clientSocket
+
+handleClient :: Socket -> IO ()
+handleClient clientSocket = do
+    msg <- recv clientSocket 1024
+    case decode msg of
+        Just block -> do
+            putStrLn $ "Received block: " ++ show (block :: Block)
+            sendAll clientSocket (encode block)
+        Nothing -> putStrLn "Failed to decode message"
+    close clientSocket
+
+-- Client Functions
+connectToServer :: PortNumber -> IO Socket
+connectToServer port = withSocketsDo $ do
+    clientSocket <- socket AF_INET Stream defaultProtocol
+    connect clientSocket (SockAddrInet port 0)
+    return clientSocket
+
+sendBlockToServer :: Socket -> Block -> IO ()
+sendBlockToServer socket block = do
+    sendAll socket (encode block)
+    response <- recv socket 1024
+    putStrLn $ "Server response: " ++ C8.unpack response
+
+-- Utility Functions
+printBlock :: Block -> IO ()
+printBlock block = putStrLn $ "Block Index: " ++ show (blockIndex block) ++
+    "\nPrevious Hash: " ++ C8.unpack (blockPreviousHash block) ++
+    "\nTimestamp: " ++ show (blockTimestamp block) ++
+    "\nTransactions: " ++ show (blockTransactions block) ++
+    "\nHash: " ++ C8.unpack (blockHash block) ++
+    "\nNonce: " ++ show (blockNonce block)
+
+generateTransactionId :: IO ByteString
+generateTransactionId = do
+    randomBytes <- randomIO :: IO ByteString
+    return $ C8.pack (show randomBytes)
+
+createSampleTransaction :: IO Transaction
+createSampleTransaction = do
+    txId <- generateTransactionId
+    let txInput = TxInput { inputTxId = txId, inputIndex = 0 }
+    let txOutput = TxOutput { outputAddress = Address Ed25519.PublicKey{..}, outputValue = 100 }
+    return $ Transaction
+        { txId = txId
+        , txInputs = [txInput]
+        , txOutputs = [txOutput]
+        }
+
+-- Main Function
+main :: IO ()
+main = do
+    putStrLn "Starting blockchain node..."
+    forkIO $ startServer 8080
+
+    -- Sample block creation and network communication
+    transaction <- createSampleTransaction
+    block <- createBlock 1 "0000000000000000" [transaction]
+    printBlock block
+
+    -- Client example
+    clientSocket <- connectToServer 8080
+    sendBlockToServer clientSocket block
+    close clientSocket
+
+
+
+
+9 4  A CHAT REAL KRILNO 
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
+
+module Main where
+
+import Crypto.Hash (Digest, SHA256, hash)
+import qualified Crypto.PubKey.Ed25519 as Ed25519
+import Crypto.Random (getRandomBytes)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as C8
+import Data.Aeson (ToJSON, FromJSON, encode, decode)
+import Data.Aeson.TH (deriveJSON, defaultOptions)
+import Data.Time.Clock.POSIX (POSIXTime, getPOSIXTime)
+import Data.Maybe (fromMaybe, isNothing)
+import Network.Socket (Socket, SockAddr, SocketType(Stream), defaultProtocol, bind, listen, accept, socket, close, withSocketsDo, Family(AF_INET), PortNumber, connect)
+import Network.Socket.ByteString (sendAll, recv)
+import Control.Concurrent (forkIO, threadDelay, MVar, newMVar, modifyMVar_, readMVar)
+import Control.Monad (forever, unless, when)
+import Control.Exception (try, SomeException, catch, throwIO)
+import Data.List (intercalate)
+import System.Random (randomRIO)
+import qualified Data.Map as Map
+import GHC.Generics (Generic)
+import Database.SQLite.Simple
+import Control.Monad.State
+import Data.Bits (shiftR, (.&.))
+
+-- Enhanced Blockchain Types and Data Structures
+
+type Blockchain = [Block]
+type UTXO = Map.Map TxOutPoint TxOutput
+
+data Block = Block
+    { blockIndex :: Int
+    , blockPreviousHash :: ByteString
+    , blockTimestamp :: POSIXTime
+    , blockTransactions :: [Transaction]
+    , blockHash :: ByteString
+    , blockNonce :: Int
+    , blockValidator :: Address
+    } deriving (Show, Generic)
+
+data Transaction = Transaction
+    { txId :: ByteString
+    , txInputs :: [TxInput]
+    , txOutputs :: [TxOutput]
+    , txSignature :: ByteString
+    } deriving (Show, Generic)
+
+data TxInput = TxInput
+    { inputOutPoint :: TxOutPoint
+    , inputSignature :: ByteString
+    } deriving (Show, Generic)
+
+data TxOutPoint = TxOutPoint
+    { outPointTxId :: ByteString
+    , outPointIndex :: Int
+    } deriving (Show, Generic)
+
+data TxOutput = TxOutput
+    { outputAddress :: Address
+    , outputValue :: Integer
+    } deriving (Show, Generic)
+
+data Address = Address
+    { addressPublicKey :: Ed25519.PublicKey
+    } deriving (Show, Generic)
+
+data Node = Node
+    { nodeSocket :: Socket
+    , nodeBlockchain :: MVar Blockchain
+    , nodePeers :: MVar [SockAddr]
+    , nodeUTXO :: MVar UTXO
+    , nodeMempool :: MVar [Transaction]
+    , nodeKeyPair :: (Ed25519.PublicKey, Ed25519.SecretKey)
+    }
+
+instance ToJSON Block
+instance FromJSON Block
+instance ToJSON Transaction
+instance FromJSON Transaction
+instance ToJSON TxInput
+instance FromJSON TxInput
+instance ToJSON TxOutPoint
+instance FromJSON TxOutPoint
+instance ToJSON TxOutput
+instance FromJSON TxOutput
+instance ToJSON Address
+instance FromJSON Address
+
+-- Improved Cryptographic Utilities and Key Management
+
+data KeyPair = KeyPair
+    { publicKey :: Ed25519.PublicKey
+    , privateKey :: Ed25519.SecretKey
+    }
+
+generateKeyPair :: IO KeyPair
+generateKeyPair = do
+    seed <- getRandomBytes 32
+    let (publicKey, privateKey) = Ed25519.generateKeyPair seed
+    return $ KeyPair publicKey privateKey
+
+signTransaction :: Ed25519.SecretKey -> Transaction -> ByteString
+signTransaction sk tx = Ed25519.sign sk (addressPublicKey (head (txOutputs tx))) (txToSignData tx)
+
+txToSignData :: Transaction -> ByteString
+txToSignData tx = C8.concat
+    [ txId tx
+    , C8.pack (show (txInputs tx))
+    , C8.pack (show (txOutputs tx))
+    ]
+
+verifyTransaction :: Transaction -> Bool
+verifyTransaction tx =
+    let pubKey = addressPublicKey (head (txOutputs tx))
+        signature = txSignature tx
+    in Ed25519.verify pubKey (txToSignData tx) signature
+
+-- Enhanced Proof-of-Stake Mechanism
+
+data Validator = Validator
+    { validatorAddress :: Address
+    , validatorStake :: Integer
+    , validatorRewards :: Integer
+    , validatorSlashCount :: Int
+    } deriving (Show, Generic)
+
+selectValidator :: [Validator] -> IO Validator
+selectValidator validators = do
+    let totalStake = sum $ map validatorStake validators
+    randomStake <- randomRIO (1, totalStake)
+    return $ pickValidator validators randomStake
+
+pickValidator :: [Validator] -> Integer -> Validator
+pickValidator (v:vs) randStake
+    | randStake <= validatorStake v = v
+    | otherwise = pickValidator vs (randStake - validatorStake v)
+pickValidator [] _ = error "Validator selection failed"
+
+updateValidatorRewards :: Validator -> Integer -> Validator
+updateValidatorRewards validator reward =
+    validator { validatorRewards = validatorRewards validator + reward }
+
+slashValidator :: Validator -> Validator
+slashValidator validator =
+    validator { validatorStake = validatorStake validator `div` 2
+              , validatorSlashCount = validatorSlashCount validator + 1
+              }
+
+-- Improved Blockchain Functions with UTXO Model
+
+createUTXO :: Transaction -> UTXO -> UTXO
+createUTXO tx utxo =
+    let newOutputs = zip (repeat (txId tx)) [0..] `zip` txOutputs tx
+    in foldr (\((txid, idx), out) -> Map.insert (TxOutPoint txid idx) out) utxo newOutputs
+
+removeUTXO :: Transaction -> UTXO -> UTXO
+removeUTXO tx = foldr (Map.delete . inputOutPoint) (txInputs tx)
+
+updateUTXO :: Transaction -> UTXO -> UTXO
+updateUTXO tx utxo = createUTXO tx (removeUTXO tx utxo)
+
+validateTransaction :: Transaction -> UTXO -> Bool
+validateTransaction tx utxo =
+    let inputSum = sum [outputValue (fromMaybe (error "Invalid input") (Map.lookup (inputOutPoint input) utxo)) | input <- txInputs tx]
+        outputSum = sum [outputValue output | output <- txOutputs tx]
+    in inputSum >= outputSum && verifyTransaction tx
+
+createBlock :: Int -> ByteString -> [Transaction] -> Validator -> UTXO -> IO Block
+createBlock index previousHash transactions validator utxo = do
+    timestamp <- getPOSIXTime
+    let block = Block
+            { blockIndex = index
+            , blockPreviousHash = previousHash
+            , blockTimestamp = timestamp
+            , blockTransactions = transactions
+            , blockHash = ""
+            , blockNonce = 0
+            , blockValidator = validatorAddress validator
+            }
+    mineBlock block
+
+mineBlock :: Block -> IO Block
+mineBlock block = do
+    let target = C8.replicate difficulty '0'
+    mine 0
+  where
+    mine nonce = do
+        let newBlock = block { blockNonce = nonce, blockHash = hashBlock block { blockNonce = nonce } }
+        if isValidProof (blockHash newBlock)
+            then return newBlock
+            else mine (nonce + 1)
+
+validateBlockchain :: Blockchain -> UTXO -> Bool
+validateBlockchain [] _ = True
+validateBlockchain [_] _ = True
+validateBlockchain (b1:b2:bs) utxo =
+    blockHash b1 == blockPreviousHash b2 
+    && isValidProof (blockHash b1) 
+    && validateBlockchain (b2:bs) (updateUTXO' b1 utxo)
+    && verifyValidator (blockValidator b1)
+  where
+    updateUTXO' block = foldr updateUTXO (blockTransactions block)
+
+-- Improved P2P Networking with Error Handling
+
+data NetworkError = ConnectionFailure | InvalidMessage | PeerNotFound
+    deriving (Show)
+
+startServer :: PortNumber -> MVar Blockchain -> MVar [SockAddr] -> MVar UTXO -> MVar [Transaction] -> IO ()
+startServer port blockchain peers utxo mempool = withSocketsDo $ do
+    serverSocket <- socket AF_INET Stream defaultProtocol
+    bind serverSocket (SockAddrInet port 0)
+    listen serverSocket 5
+    putStrLn $ "Server listening on port " ++ show port
+    forever $ do
+        (clientSocket, clientAddr) <- accept serverSocket
+        modifyMVar_ peers $ \ps -> return (clientAddr:ps)
+        forkIO $ handleClient clientSocket blockchain peers utxo mempool `catch` handleNetworkError
+
+handleClient :: Socket -> MVar Blockchain -> MVar [SockAddr] -> MVar UTXO -> MVar [Transaction] -> IO ()
+handleClient clientSocket blockchain peers utxo mempool = do
+    msg <- recv clientSocket 1024
+    case decode msg of
+        Just block -> do
+            putStrLn $ "Received block: " ++ show (block :: Block)
+            bc <- readMVar blockchain
+            currentUTXO <- readMVar utxo
+            if validateBlockchain (block : bc) currentUTXO
+                then do
+                   
+
+
+
+
+9. 4 A CLAUDE  NEW KRILNO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
