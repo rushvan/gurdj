@@ -2135,6 +2135,1031 @@ main = do
 
 
 
+9 1 AA CHAT  KRILNO IMPLEMENT 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import Data.ByteString.Char8 (pack, unpack)
+import Crypto.Hash (SHA256(..), hash)
+import qualified Data.Map as M
+import Data.List (find)
+import Control.Monad (when)
+
+-- Data structures for blockchain
+data Token = Token
+  { tokenId :: Int
+  , tokenName :: String
+  , tokenSymbol :: String
+  , tokenSupply :: Integer
+  } deriving (Show, Eq)
+
+data Block = Block
+  { index :: Int
+  , previousHash :: String
+  , timestamp :: Int
+  , transactions :: [Transaction]
+  , hash :: String
+  , proof :: Int
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: String
+  , receiver :: String
+  , amount :: Integer
+  } deriving (Show, Eq)
+
+data SmartContract = SmartContract
+  { contractId :: Int
+  , contractCode :: String
+  } deriving (Show, Eq)
+
+data Shard = Shard
+  { shardId :: Int
+  , shardBlocks :: [Block]
+  } deriving (Show, Eq)
+
+data Proposal = Proposal
+  { proposalId :: Int
+  , proposalDescription :: String
+  , votes :: [String]
+  } deriving (Show, Eq)
+
+-- Initialize blockchain
+initializeBlockchain :: [Block]
+initializeBlockchain = [createGenesisBlock]
+
+createGenesisBlock :: Block
+createGenesisBlock = Block
+  { index = 0
+  , previousHash = "0"
+  , timestamp = currentTimestamp
+  , transactions = []
+  , hash = calculateHash createGenesisBlock
+  , proof = 0
+  }
+
+currentTimestamp :: Int
+currentTimestamp = round =<< getPOSIXTime
+
+-- Function to calculate hash
+calculateHash :: Block -> String
+calculateHash block = show (index block) ++ previousHash block ++ show (timestamp block) ++ show (transactions block) ++ show (proof block)
+
+-- Function to validate a new block
+validateBlock :: Block -> [Block] -> Bool
+validateBlock block blockchain =
+  let previousBlock = last blockchain
+      computedHash = calculateHash block
+  in (previousHash block == hash previousBlock) && (hash block == computedHash)
+
+-- zk-SNARKs Placeholder Functions
+generateProof :: String -> String
+generateProof dataStr = "proofFor" ++ dataStr
+
+verifyProof :: String -> String -> Bool
+verifyProof proof dataStr = proof == generateProof dataStr
+
+-- Cross-Chain Transaction Handling (simplified)
+processCrossChainTransaction :: Transaction -> Bool
+processCrossChainTransaction tx =
+  let compatibleChains = ["chain1", "chain2"]
+  in receiver tx `elem` compatibleChains
+
+-- Security: Simplified encryption for transactions (dummy example)
+encryptTransaction :: Transaction -> String
+encryptTransaction tx = "encrypted:" ++ show tx
+
+decryptTransaction :: String -> Transaction
+decryptTransaction encryptedTx = read (drop 10 encryptedTx)
+
+-- Sharding (simplified example)
+shards :: [Shard]
+shards = [createShard 1, createShard 2]
+
+createShard :: Int -> Shard
+createShard id = Shard
+  { shardId = id
+  , shardBlocks = [createGenesisBlock]
+  }
+
+-- Consensus Mechanism: Proof of Stake (simplified)
+type Stake = Integer
+type Validator = String
+type Stakeholder = (Validator, Stake)
+
+stakeholders :: [Stakeholder]
+stakeholders = [("validator1", 1000), ("validator2", 1500)]
+
+proofOfStake :: Stakeholder -> Int
+proofOfStake (validator, stake) = fromIntegral (fromEnum validator + fromIntegral stake `mod` 10000)
+
+-- Smart Contracts
+executeContract :: SmartContract -> Bool
+executeContract contract =
+  case contractCode contract of
+    "validCode" -> True
+    _           -> False
+
+-- Governance and API
+submitProposal :: Proposal -> Bool
+submitProposal _ = True
+
+voteOnProposal :: Proposal -> String -> Bool
+voteOnProposal proposal vote =
+  let updatedProposal = proposal { votes = vote : votes proposal }
+  in submitProposal updatedProposal
+
+-- Blockchain Process with zk-SNARKs and Cross-Chain Transactions
+blockchainProcess :: [Block] -> [Transaction] -> [Block]
+blockchainProcess blocks txs =
+  let newBlock = createNewBlock (last blocks) txs
+  in if validateBlock newBlock blocks
+     then newBlock : blocks
+     else blocks
+
+createNewBlock :: Block -> [Transaction] -> Block
+createNewBlock previousBlock txs = Block
+  { index = index previousBlock + 1
+  , previousHash = hash previousBlock
+  , timestamp = currentTimestamp
+  , transactions = txs
+  , hash = calculateHash newBlock
+  , proof = proofOfStake (head stakeholders)
+  }
+
+-- Main function
+main :: IO ()
+main = do
+  let initialBlockchain = initializeBlockchain
+  let transactions = [Transaction "Alice" "Bob" 10]
+  let updatedBlockchain = blockchainProcess initialBlockchain transactions
+  putStrLn "Blockchain processed and updated."
+
+-- Note: For real-world implementation:
+-- 1. Integrate a zk-SNARK library for actual proof generation and verification.
+-- 2. Implement real cross-chain transaction protocols.
+-- 3. Conduct comprehensive security audits and use robust cryptographic methods.
+-- 4. Develop sophisticated sharding and scalability solutions.
+-- 5. Implement and test a full consensus mechanism.
+-- 6. Set up network nodes, peer-to-peer communication, and data storage.
+-- 7. Develop and rigorously test smart contracts.
+
+
+
+
+9 1 AA CLAUDE KRILNO IMPLEMENT 
+
+
+5{-# LANGUAGE OverloadedStrings #-}
+
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import qualified Data.ByteString.Char8 as BS
+import qualified Crypto.Hash as Crypto
+import qualified Crypto.PubKey.ECC.ECDSA as ECDSA
+import qualified Crypto.PubKey.ECC.Generate as ECC
+import qualified Crypto.PubKey.ECC.Types as ECC
+import qualified Data.Map.Strict as Map
+import Control.Concurrent (forkIO)
+import Network.Socket
+import Control.Monad (forever, when)
+import System.Random (randomRIO)
+
+-- Improved data structures
+data Block = Block
+  { index :: Int
+  , previousHash :: BS.ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , hash :: BS.ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: BS.ByteString
+  , receiver :: BS.ByteString
+  , amount :: Integer
+  , signature :: ECDSA.Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , nodes :: [SockAddr]
+  , stateDB :: Map.Map BS.ByteString Integer  -- Simple key-value store for balances
+  } deriving (Show)
+
+-- Improved cryptographic functions
+sha256 :: BS.ByteString -> BS.ByteString
+sha256 = BS.pack . show . Crypto.hash @Crypto.SHA256
+
+signTransaction :: ECDSA.PrivateKey -> Transaction -> IO ECDSA.Signature
+signTransaction privateKey tx = do
+  let message = BS.concat [sender tx, receiver tx, BS.pack (show (amount tx))]
+  ECDSA.sign privateKey Crypto.SHA256 message
+
+verifyTransaction :: ECDSA.PublicKey -> Transaction -> Bool
+verifyTransaction publicKey tx =
+  let message = BS.concat [sender tx, receiver tx, BS.pack (show (amount tx))]
+  in ECDSA.verify Crypto.SHA256 publicKey (signature tx) message
+
+-- Improved block creation and validation
+createBlock :: [Transaction] -> Block -> IO Block
+createBlock transactions previousBlock = do
+  timestamp <- round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = hash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , hash = hash'
+    }
+
+mineBlock :: Int -> BS.ByteString -> Integer -> [Transaction] -> IO (Integer, BS.ByteString)
+mineBlock index prevHash timestamp txs = go 0
+  where
+    go nonce = do
+      let hash' = calculateHash index prevHash timestamp txs nonce
+      if BS.take 4 hash' == "0000"
+        then return (nonce, hash')
+        else go (nonce + 1)
+
+calculateHash :: Int -> BS.ByteString -> Integer -> [Transaction] -> Integer -> BS.ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ BS.pack (show index)
+    , prevHash
+    , BS.pack (show timestamp)
+    , BS.concat (map (\tx -> BS.concat [sender tx, receiver tx, BS.pack (show (amount tx))]) txs)
+    , BS.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Bool
+isValidBlock newBlock prevBlock =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == hash prevBlock &&
+  hash newBlock == calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) &&
+  BS.take 4 (hash newBlock) == "0000"
+
+-- Improved consensus mechanism (still simplified)
+resolveConflicts :: Blockchain -> [Blockchain] -> Blockchain
+resolveConflicts localChain otherChains =
+  let validChains = filter isValidChain otherChains
+      longestChain = foldl (\acc c -> if length (chain c) > length (chain acc) then c else acc) localChain validChains
+  in if length (chain longestChain) > length (chain localChain) then longestChain else localChain
+
+isValidChain :: Blockchain -> Bool
+isValidChain bc =
+  and $ zipWith isValidBlock (tail $ chain bc) (chain bc)
+
+-- Networking (basic P2P)
+startNode :: Blockchain -> IO ()
+startNode bc = do
+  sock <- socket AF_INET Stream 0
+  bind sock (SockAddrInet 8333 0)
+  listen sock 5
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleConnection conn bc
+
+handleConnection :: Socket -> Blockchain -> IO ()
+handleConnection conn bc = do
+  msg <- recv conn 1024
+  case msg of
+    "GET_CHAIN" -> do
+      send conn (show $ chain bc)
+      close conn
+    _ -> close conn
+
+broadcastBlock :: Block -> [SockAddr] -> IO ()
+broadcastBlock block nodes = do
+  forM_ nodes $ \node -> do
+    sock <- socket AF_INET Stream 0
+    connect sock node
+    send sock (show block)
+    close sock
+
+-- Main function
+main :: IO ()
+main = do
+  -- Generate a key pair for testing
+  curve <- ECC.getCurveByName ECC.SEC_p256r1
+  (pubKey, privKey) <- ECC.generate curve
+
+  -- Create genesis block and initial blockchain
+  genesisBlock <- createBlock [] (Block 0 "0" 0 [] 0 "0")
+  let initialBlockchain = Blockchain [genesisBlock] [] [] Map.empty
+
+  -- Start the node
+  startNode initialBlockchain
+
+  -- Example of adding a transaction and mining a new block
+  let tx = Transaction "Alice" "Bob" 10 undefined
+  signedTx <- signTransaction privKey tx
+  let newBlockchain = initialBlockchain { pendingTransactions = [signedTx] }
+  newBlock <- createBlock (pendingTransactions newBlockchain) (head $ chain newBlockchain)
+  let updatedBlockchain = newBlockchain { chain = newBlock : chain newBlockchain, pendingTransactions = [] }
+
+  putStrLn "Blockchain initialized and first block mined."
+  print updatedBlockchain
+
+-- Note: This is still a simplified implementation. For a production system, you would need:
+-- 1. Proper error handling and logging
+-- 2. Persistent storage for the blockchain and state
+-- 3. A more sophisticated P2P network implementation
+-- 4. A full node discovery and management system
+-- 5. More comprehensive transaction and block validation
+-- 6. A proper mempool for managing pending transactions
+-- 7. Proper handling of forks and chain reorganizations
+-- 8. Implementation of a full consensus protocol (e.g., practical Byzantine Fault Tolerance)
+-- 9. Extensive testing, including unit tests, integration tests, and network simulations
+-- 10. Security audits and penetration testing
+
+
+
+
+9 1 AAA CHAT KRILNO IMPLEMENT 
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (try, SomeException)
+import Control.Monad (forever, when, forM_)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.IO (writeFile, readFile)
+import System.Random (randomRIO, randomRs)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECDSA (PrivateKey, PublicKey, Signature, sign, verify)
+import Crypto.PubKey.ECC.Types (CurveName, getCurveByName, generate)
+import Data.Maybe (fromMaybe)
+import Data.List (sortOn, reverse)
+import Network.Socket
+import Network.Socket.ByteString (recv, send)
+
+-- Data Structures
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , hash :: ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , signature :: Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , nodes :: [SockAddr]
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , adjustmentInterval :: Int
+  , targetBlockTime :: Int
+  , lastAdjustmentTime :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , lastBlockTime :: Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  } deriving (Show)
+
+-- Cryptographic Functions
+sha256 :: ByteString -> ByteString
+sha256 = C8.pack . show . hash @SHA256
+
+signTransaction :: PrivateKey -> Transaction -> ByteString -> IO Signature
+signTransaction privKey tx message = return $ sign privKey message
+
+verifyTransaction :: PublicKey -> Transaction -> Bool
+verifyTransaction pubKey tx =
+  let message = C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)
+  in verify pubKey (signature tx) message
+
+-- Block Creation and Validation
+createBlock :: [Transaction] -> Block -> IO Block
+createBlock transactions previousBlock = do
+  timestamp <- round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = hash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , hash = hash'
+    }
+
+mineBlock :: Int -> ByteString -> Integer -> [Transaction] -> IO (Integer, ByteString)
+mineBlock index prevHash timestamp txs = do
+  difficulty <- getDifficulty
+  go 0
+  where
+    go nonce = do
+      let hash' = calculateHash index prevHash timestamp txs nonce
+      if BS.take difficulty hash' == BS.replicate difficulty '0'
+        then return (nonce, hash')
+        else go (nonce + 1)
+
+calculateHash :: Int -> ByteString -> Integer -> [Transaction] -> Integer -> ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ C8.pack (show index)
+    , prevHash
+    , C8.pack (show timestamp)
+    , BS.concat (map (\tx -> C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)) txs)
+    , C8.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Bool
+isValidBlock newBlock prevBlock =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == hash prevBlock &&
+  hash newBlock == calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) &&
+  BS.take (difficulty newBlock) (hash newBlock) == BS.replicate (difficulty newBlock) '0'
+
+-- Advanced Proof-of-Stake (PoS)
+data ProofOfStake = ProofOfStake
+  { totalStake :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  }
+
+chooseValidator :: ProofOfStake -> IO ByteString
+chooseValidator pos = do
+  rand <- randomRIO (0, totalStake pos - 1)
+  return $ fst $ head $ dropWhile (\(_, stake) -> stake <= rand) $ Map.toList (stakeHolders pos)
+
+getProofOfStake :: Blockchain -> IO ProofOfStake
+getProofOfStake bc = do
+  let stakeHolders' = stakeHolders bc
+      totalStake' = fromIntegral $ sum $ Map.elems stakeHolders'
+      validators' = filter (`Map.member` stakeHolders') (validators bc)
+  return ProofOfStake { totalStake = totalStake', stakeHolders = stakeHolders', currentEpoch = currentEpoch bc, epochLength = epochLength bc, validators = validators' }
+
+validateBlock :: Block -> Blockchain -> IO Bool
+validateBlock block bc = do
+  let isValid = isValidBlock block (head $ chain bc)
+  pos <- getProofOfStake bc
+  validator <- chooseValidator pos
+  return $ isValid && (hash block == calculateHash (index block) (previousHash block) (timestamp block) (transactions block) (nonce block)) && (validator `elem` validators bc)
+
+-- Difficulty Adjustment
+adjustDifficulty :: Blockchain -> IO ()
+adjustDifficulty bc = do
+  now <- round <$> getPOSIXTime
+  let elapsed = now - lastAdjustmentTime bc
+  when (elapsed >= adjustmentInterval bc) $ do
+    let averageBlockTime = calculateAverageBlockTime bc
+    let newDifficulty = if averageBlockTime < targetBlockTime bc
+                          then difficulty bc + 1
+                          else max 1 (difficulty bc - 1)
+    updateDifficulty bc newDifficulty
+    saveBlockchain bc { difficulty = newDifficulty, lastAdjustmentTime = now }
+
+calculateAverageBlockTime :: Blockchain -> Int
+calculateAverageBlockTime bc = 
+  let times = zipWith (-) (tail $ map timestamp $ chain bc) (map timestamp $ chain bc)
+  in if null times then 0 else fromIntegral (sum times) `div` fromIntegral (length times)
+
+-- Epoch Management
+startNewEpoch :: Blockchain -> IO Blockchain
+startNewEpoch bc = do
+  now <- round <$> getPOSIXTime
+  let newEpoch = currentEpoch bc + 1
+  let updatedValidators = selectNewValidators (stakeHolders bc) (epochLength bc)
+  saveBlockchain bc { currentEpoch = newEpoch, validators = updatedValidators, lastBlockTime = now }
+  return bc { currentEpoch = newEpoch, validators = updatedValidators, lastBlockTime = now }
+
+selectNewValidators :: Map ByteString Integer -> Int -> [ByteString]
+selectNewValidators stakeholders numValidators = 
+  let sortedStakes = reverse $ sortOn snd $ Map.toList stakeholders
+  in map fst $ take numValidators sortedStakes
+
+-- Persistent Storage
+saveBlockchain :: Blockchain -> IO ()
+saveBlockchain bc = do
+  writeFile "blockchain.dat" (show bc)
+
+loadBlockchain :: IO (Either SomeException Blockchain)
+loadBlockchain = try $ do
+  contents <- readFile "blockchain.dat"
+  return (read contents :: Blockchain)
+
+-- Networking
+startNode :: Blockchain -> IO ()
+startNode bc = do
+  sock <- socket AF_INET Stream 0
+  bind sock (SockAddrInet 8333 0)
+  listen sock 5
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleConnection conn bc
+
+handleConnection :: Socket -> Blockchain -> IO ()
+handleConnection conn bc = do
+  result <- try (recv conn 1024) :: IO (Either SomeException ByteString)
+  case result of
+    Right msg -> do
+      case C8.unpack msg of
+        "GET_CHAIN" -> do
+          send conn (C8.pack $ show $ chain bc)
+          close conn
+        _ -> close conn
+    Left e -> do
+      print (e :: SomeException)
+      close conn
+
+broadcastBlock :: Block -> [SockAddr] -> IO ()
+broadcastBlock block nodes = do
+  forM_ nodes $ \node -> do
+    sock <- socket AF_INET Stream 0
+    connect sock node
+    send sock (C8.pack $ show block)
+    close sock
+
+main :: IO ()
+main = do
+  -- Initialize blockchain or load existing one
+  eitherBlockchain <- loadBlockchain
+  blockchain <- case eitherBlockchain of
+    Right bc -> return bc
+    Left _ -> return Blockchain
+      { chain = [genesisBlock]
+      , pendingTransactions = []
+      , nodes = []
+      , stateDB = Map.empty
+      , difficulty = 4
+      , adjustmentInterval = 600
+      , targetBlockTime = 600
+      , lastAdjustmentTime = 0
+      , stakeHolders = Map.singleton (C8.pack $ show pubKey) 1000
+      , lastBlockTime = 0
+      , currentEpoch = 0
+      , epochLength = 100
+      , validators = [C8.pack $ show pubKey]
+      }
+
+  -- Start the node
+  forkIO $ startNode blockchain
+
+  -- Periodically adjust difficulty and start new epochs
+  forever $ do
+    threadDelay 60000000  -- 60 seconds
+    adjustDifficulty blockchain
+    blockchain' <- startNewEpoch blockchain
+    saveBlockchain blockchain'
+
+
+
+
+9 1 AAB CHAT KRILNO IMPLEMENT 
+
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (try, SomeException)
+import Control.Monad (forever, when, forM_)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.IO (writeFile, readFile)
+import System.Random (randomRIO, randomRs)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECDSA (PrivateKey, PublicKey, Signature, sign, verify)
+import Crypto.PubKey.ECC.Types (CurveName, getCurveByName, generate)
+import Data.Maybe (fromMaybe)
+import Data.List (sortOn, reverse)
+import Network.Socket
+import Network.Socket.ByteString (recv, send)
+
+-- Data Structures
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , hash :: ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , signature :: Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , nodes :: [SockAddr]
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , adjustmentInterval :: Int
+  , targetBlockTime :: Int
+  , lastAdjustmentTime :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , lastBlockTime :: Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  } deriving (Show)
+
+-- Cryptographic Functions
+sha256 :: ByteString -> ByteString
+sha256 = C8.pack . show . hash @SHA256
+
+signTransaction :: PrivateKey -> Transaction -> ByteString -> IO Signature
+signTransaction privKey tx message = return $ sign privKey message
+
+verifyTransaction :: PublicKey -> Transaction -> Bool
+verifyTransaction pubKey tx =
+  let message = C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)
+  in verify pubKey (signature tx) message
+
+-- Block Creation and Validation
+createBlock :: [Transaction] -> Block -> IO Block
+createBlock transactions previousBlock = do
+  timestamp <- round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = hash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , hash = hash'
+    }
+
+mineBlock :: Int -> ByteString -> Integer -> [Transaction] -> IO (Integer, ByteString)
+mineBlock index prevHash timestamp txs = do
+  difficulty <- getDifficulty
+  go 0
+  where
+    go nonce = do
+      let hash' = calculateHash index prevHash timestamp txs nonce
+      if BS.take difficulty hash' == BS.replicate difficulty '0'
+        then return (nonce, hash')
+        else go (nonce + 1)
+
+calculateHash :: Int -> ByteString -> Integer -> [Transaction] -> Integer -> ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ C8.pack (show index)
+    , prevHash
+    , C8.pack (show timestamp)
+    , BS.concat (map (\tx -> C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)) txs)
+    , C8.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Bool
+isValidBlock newBlock prevBlock =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == hash prevBlock &&
+  hash newBlock == calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) &&
+  BS.take (difficulty newBlock) (hash newBlock) == BS.replicate (difficulty newBlock) '0'
+
+-- Advanced Proof-of-Stake (PoS)
+data ProofOfStake = ProofOfStake
+  { totalStake :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  }
+
+chooseValidator :: ProofOfStake -> IO ByteString
+chooseValidator pos = do
+  rand <- randomRIO (0, totalStake pos - 1)
+  return $ fst $ head $ dropWhile (\(_, stake) -> stake <= rand) $ Map.toList (stakeHolders pos)
+
+getProofOfStake :: Blockchain -> IO ProofOfStake
+getProofOfStake bc = do
+  let stakeHolders' = stakeHolders bc
+      totalStake' = fromIntegral $ sum $ Map.elems stakeHolders'
+      validators' = filter (`Map.member` stakeHolders') (validators bc)
+  return ProofOfStake { totalStake = totalStake', stakeHolders = stakeHolders', currentEpoch = currentEpoch bc, epochLength = epochLength bc, validators = validators' }
+
+validateBlock :: Block -> Blockchain -> IO Bool
+validateBlock block bc = do
+  let isValid = isValidBlock block (head $ chain bc)
+  pos <- getProofOfStake bc
+  validator <- chooseValidator pos
+  return $ isValid && (hash block == calculateHash (index block) (previousHash block) (timestamp block) (transactions block) (nonce block)) && (validator `elem` validators bc)
+
+-- Difficulty Adjustment
+adjustDifficulty :: Blockchain -> IO ()
+adjustDifficulty bc = do
+  now <- round <$> getPOSIXTime
+  let elapsed = now - lastAdjustmentTime bc
+  when (elapsed >= adjustmentInterval bc) $ do
+    let averageBlockTime = calculateAverageBlockTime bc
+    let newDifficulty = if averageBlockTime < targetBlockTime bc
+                          then difficulty bc + 1
+                          else max 1 (difficulty bc - 1)
+    updateDifficulty bc newDifficulty
+    saveBlockchain bc { difficulty = newDifficulty, lastAdjustmentTime = now }
+
+calculateAverageBlockTime :: Blockchain -> Int
+calculateAverageBlockTime bc = 
+  let times = zipWith (-) (tail $ map timestamp $ chain bc) (map timestamp $ chain bc)
+  in if null times then 0 else fromIntegral (sum times) `div` fromIntegral (length times)
+
+-- Epoch Management
+startNewEpoch :: Blockchain -> IO Blockchain
+startNewEpoch bc = do
+  now <- round <$> getPOSIXTime
+  let newEpoch = currentEpoch bc + 1
+  let updatedValidators = selectNewValidators (stakeHolders bc) (epochLength bc)
+  saveBlockchain bc { currentEpoch = newEpoch, validators = updatedValidators, lastBlockTime = now }
+  return bc { currentEpoch = newEpoch, validators = updatedValidators, lastBlockTime = now }
+
+selectNewValidators :: Map ByteString Integer -> Int -> [ByteString]
+selectNewValidators stakeholders numValidators = 
+  let sortedStakes = reverse $ sortOn snd $ Map.toList stakeholders
+  in map fst $ take numValidators sortedStakes
+
+-- Persistent Storage
+saveBlockchain :: Blockchain -> IO ()
+saveBlockchain bc = do
+  writeFile "blockchain.dat" (show bc)
+
+loadBlockchain :: IO (Either SomeException Blockchain)
+loadBlockchain = try $ do
+  contents <- readFile "blockchain.dat"
+  return $ read contents
+
+-- Networking
+startNode :: Blockchain -> IO ()
+startNode blockchain = do
+  sock <- socket AF_INET Stream 0
+  bind sock (SockAddrInet 8080 iNADDR_ANY)
+  listen sock 1
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleClient conn blockchain
+
+handleClient :: Socket -> Blockchain -> IO ()
+handleClient conn blockchain = do
+  msg <- recv conn 1024
+  -- Handle incoming messages here
+  send conn (C8.pack "Message received")
+  close conn
+
+main :: IO ()
+main = do
+  -- Initialize blockchain or load existing one
+  eitherBlockchain <- loadBlockchain
+  blockchain <- case eitherBlockchain of
+    Right bc -> return bc
+    Left _ -> return Blockchain
+      { chain = [genesisBlock]
+      , pendingTransactions = []
+      , nodes = []
+      , stateDB = Map.empty
+      , difficulty = 4
+      , adjustmentInterval = 600
+      , targetBlockTime = 600
+      , lastAdjustmentTime = 0
+      , stakeHolders = Map.singleton (C8.pack $ show pubKey) 1000
+      , lastBlockTime = 0
+      , currentEpoch = 0
+      , epochLength = 100
+      , validators = [C8.pack $ show pubKey]
+      }
+
+  -- Start the node
+  forkIO $ startNode blockchain
+
+  -- Periodically adjust difficulty and start new epochs
+  forever $ do
+    threadDelay 60000000  -- 60 seconds
+    adjustDifficulty blockchain
+    blockchain' <- startNewEpoch blockchain
+    saveBlockchain blockchain'
+
+
+
+9 1 AABB CHAT KRILNO IMPLEMENT 
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-}
+
+import Control.Concurrent (forkIO, threadDelay)
+import Control.Exception (try, SomeException)
+import Control.Monad (forever, when, forM_)
+import Data.ByteString (ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.IO (writeFile, readFile, appendFile)
+import System.Random (randomRIO)
+import Crypto.Hash (Digest, SHA256, hash)
+import Crypto.PubKey.ECDSA (PrivateKey, PublicKey, Signature, sign, verify)
+import Crypto.PubKey.ECC.Types (CurveName, getCurveByName, generate)
+import Data.Maybe (fromMaybe)
+import Data.List (sortOn)
+import Network.Socket
+import Network.Socket.ByteString (recv, send)
+
+-- Data Structures
+data Block = Block
+  { index :: Int
+  , previousHash :: ByteString
+  , timestamp :: Integer
+  , transactions :: [Transaction]
+  , nonce :: Integer
+  , hash :: ByteString
+  } deriving (Show, Eq)
+
+data Transaction = Transaction
+  { sender :: ByteString
+  , receiver :: ByteString
+  , amount :: Integer
+  , signature :: Signature
+  } deriving (Show, Eq)
+
+data Blockchain = Blockchain
+  { chain :: [Block]
+  , pendingTransactions :: [Transaction]
+  , nodes :: [SockAddr]
+  , stateDB :: Map ByteString Integer
+  , difficulty :: Int
+  , adjustmentInterval :: Int
+  , targetBlockTime :: Int
+  , lastAdjustmentTime :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , lastBlockTime :: Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  } deriving (Show)
+
+-- Cryptographic Functions
+sha256 :: ByteString -> ByteString
+sha256 = C8.pack . show . hash @SHA256
+
+signTransaction :: PrivateKey -> Transaction -> ByteString -> IO Signature
+signTransaction privKey tx message = return $ sign privKey message
+
+verifyTransaction :: PublicKey -> Transaction -> Bool
+verifyTransaction pubKey tx =
+  let message = C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)
+  in verify pubKey (signature tx) message
+
+-- Block Creation and Validation
+createBlock :: [Transaction] -> Block -> IO Block
+createBlock transactions previousBlock = do
+  timestamp <- round <$> getPOSIXTime
+  let index' = index previousBlock + 1
+      previousHash' = hash previousBlock
+  (nonce', hash') <- mineBlock index' previousHash' timestamp transactions
+  return Block
+    { index = index'
+    , previousHash = previousHash'
+    , timestamp = timestamp
+    , transactions = transactions
+    , nonce = nonce'
+    , hash = hash'
+    }
+
+mineBlock :: Int -> ByteString -> Integer -> [Transaction] -> IO (Integer, ByteString)
+mineBlock index prevHash timestamp txs = do
+  difficulty <- getDifficulty
+  go 0
+  where
+    go nonce = do
+      let hash' = calculateHash index prevHash timestamp txs nonce
+      if BS.take difficulty hash' == BS.replicate difficulty '0'
+        then return (nonce, hash')
+        else go (nonce + 1)
+
+calculateHash :: Int -> ByteString -> Integer -> [Transaction] -> Integer -> ByteString
+calculateHash index prevHash timestamp txs nonce =
+  sha256 $ BS.concat
+    [ C8.pack (show index)
+    , prevHash
+    , C8.pack (show timestamp)
+    , BS.concat (map (\tx -> C8.pack $ show (sender tx) ++ show (receiver tx) ++ show (amount tx)) txs)
+    , C8.pack (show nonce)
+    ]
+
+isValidBlock :: Block -> Block -> Bool
+isValidBlock newBlock prevBlock =
+  index newBlock == index prevBlock + 1 &&
+  previousHash newBlock == hash prevBlock &&
+  hash newBlock == calculateHash (index newBlock) (previousHash newBlock) (timestamp newBlock) (transactions newBlock) (nonce newBlock) &&
+  BS.take (difficulty newBlock) (hash newBlock) == BS.replicate (difficulty newBlock) '0'
+
+-- Advanced Proof-of-Stake (PoS)
+data ProofOfStake = ProofOfStake
+  { totalStake :: Integer
+  , stakeHolders :: Map ByteString Integer
+  , currentEpoch :: Int
+  , epochLength :: Int
+  , validators :: [ByteString]
+  }
+
+chooseValidator :: ProofOfStake -> IO ByteString
+chooseValidator pos = do
+  let total = totalStake pos
+  rand <- randomRIO (0, total - 1)
+  let chosen = selectValidator (stakeHolders pos) rand
+  return chosen
+
+selectValidator :: Map ByteString Integer -> Integer -> ByteString
+selectValidator stakeholders rand = 
+  let sorted = sortOn snd (Map.toList stakeholders)
+      cumulative = scanl1 (+) (map snd sorted)
+  in fst $ head $ dropWhile ((< rand) . snd) (zip (map fst sorted) cumulative)
+
+-- Persistent Storage Functions
+saveBlock :: Block -> IO ()
+saveBlock block = appendFile "blocks.dat" (show block ++ "\n")
+
+loadBlocks :: IO [Block]
+loadBlocks = do
+  content <- readFile "blocks.dat"
+  return $ map read (lines content)
+
+saveTransaction :: Transaction -> IO ()
+saveTransaction tx = appendFile "transactions.dat" (show tx ++ "\n")
+
+loadTransactions :: IO [Transaction]
+loadTransactions = do
+  content <- readFile "transactions.dat"
+  return $ map read (lines content)
+
+-- Networking Functions
+startServer :: IO ()
+startServer = do
+  sock <- socket AF_INET Stream defaultProtocol
+  bind sock (SockAddrInet 8080 iNADDR_ANY)
+  listen sock 1
+  forever $ do
+    (conn, _) <- accept sock
+    forkIO $ handleClient conn
+
+handleClient :: Socket -> IO ()
+handleClient conn = do
+  msg <- recv conn 1024
+  case msg of
+    "getBlocks" -> do
+      blocks <- loadBlocks
+      send conn (C8.pack $ show blocks)
+    "getTransactions" -> do
+      txs <- loadTransactions
+      send conn (C8.pack $ show txs)
+    _ -> return ()
+  close conn
+
+broadcast :: ByteString -> [SockAddr] -> IO ()
+broadcast message nodes = forM_ nodes $ \node -> do
+  sock <- socket AF_INET Stream defaultProtocol
+  connect sock node
+  send sock message
+  close sock
+
+-- Example Usage
+main :: IO ()
+main = do
+  putStrLn "Starting Blockchain Node"
+  forkIO startServer
+  -- Additional setup for the blockchain and peer connections here
+  return ()
+
 
 
 
