@@ -1,0 +1,356 @@
+
+
+-- File: production-ready-cardano-blockchain.cabal
+
+name:                production-ready-cardano-blockchain
+version:             1.2.0.0
+license:             BSD3
+author:              Your Name
+maintainer:          your.email@example.com
+build-type:          Simple
+extra-source-files:  README.md
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Blockchain.Types
+                     , Blockchain.CLI
+                     , Blockchain.Commands
+                     , Blockchain.Cardano
+                     , Blockchain.Config
+                     , Blockchain.Logging
+                     , Blockchain.Plutus
+                     , Blockchain.Consensus
+                     , Blockchain.Governance
+                     , Blockchain.Scalability
+                     , Blockchain.Interoperability
+                     , Blockchain.Privacy
+                     , Blockchain.Error
+                     , Blockchain.Setup
+                     , Blockchain.Security
+                     , Blockchain.Monitoring
+  build-depends:       base >= 4.7 && < 5
+                     , aeson
+                     , bytestring
+                     , cardano-api
+                     , cardano-crypto-class
+                     , cardano-ledger-core
+                     , containers
+                     , cryptonite
+                     , data-default
+                     , exceptions
+                     , filepath
+                     , monad-logger
+                     , mtl
+                     , plutus-ledger-api
+                     , plutus-tx
+                     , plutus-tx-plugin
+                     , process
+                     , text
+                     , time
+                     , transformers
+                     , yaml
+                     , hydra-node
+                     , ouroboros-network
+                     , crosschain-sdk
+                     , zk-snarks
+                     , cardano-wallet
+                     , cardano-node
+                     , cardano-cli
+                     , prometheus
+                     , warp
+                     , http-types
+                     , servant-server
+  default-language:    Haskell2010
+
+executable production-ready-cardano-blockchain
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  build-depends:       base
+                     , production-ready-cardano-blockchain
+                     , monad-logger
+                     , mtl
+                     , text
+                     , optparse-applicative
+  default-language:    Haskell2010
+
+test-suite production-ready-cardano-blockchain-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  other-modules:       Blockchain.ConsensusSpec
+                     , Blockchain.GovernanceSpec
+                     , Blockchain.ScalabilitySpec
+                     , Blockchain.InteroperabilitySpec
+                     , Blockchain.PrivacySpec
+                     , Blockchain.SetupSpec
+                     , Blockchain.SecuritySpec
+  build-depends:       base
+                     , production-ready-cardano-blockchain
+                     , tasty
+                     , tasty-hunit
+                     , tasty-quickcheck
+                     , QuickCheck
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+-- File: src/Blockchain/Setup.hs
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Blockchain.Setup where
+
+import Blockchain.Types
+import Blockchain.Error
+import Blockchain.Scalability (createHydraHead)
+import Blockchain.Interoperability (initBridge)
+import Blockchain.Privacy (initPrivacy)
+import Blockchain.Governance (initGovernance)
+import Blockchain.Consensus (initConsensus)
+import Blockchain.Security (initSecurityModule, encryptSensitiveData)
+import Blockchain.Monitoring (initMonitoring, logMetric)
+import Blockchain.Logging (initLogging, logInfo, logError, LoggingT)
+import Control.Monad.Except (ExceptT, throwError, liftIO)
+import qualified Cardano.Node as Node
+import qualified Cardano.Wallet as Wallet
+import qualified Cardano.CLI as CLI
+import System.Process (readProcess)
+import System.FilePath ((</>))
+import Control.Exception (try, SomeException)
+
+setupBlockchain :: Config -> ExceptT BlockchainError (LoggingT IO) ()
+setupBlockchain config = do
+    logInfo "Setting up blockchain..."
+    setupDependencies
+    setupInfrastructure config
+    deploySmartContracts config
+    initMonitoring config
+    logInfo "Blockchain setup complete."
+    logMetric "blockchain_setup_complete" 1
+
+setupDependencies :: ExceptT BlockchainError (LoggingT IO) ()
+setupDependencies = do
+    logInfo "Setting up dependencies..."
+    checkDependency "cardano-node"
+    checkDependency "cardano-wallet"
+    checkDependency "cardano-cli"
+    checkDependency "hydra-node"
+    logInfo "Dependencies setup complete."
+
+checkDependency :: String -> ExceptT BlockchainError (LoggingT IO) ()
+checkDependency dep = do
+    installed <- liftIO $ isInstalled dep
+    if installed
+        then logInfo $ dep <> " is installed."
+        else throwError $ ConfigurationError $ "Dependency not found: " <> dep
+
+isInstalled :: String -> IO Bool
+isInstalled dep = do
+    result <- try $ readProcess "which" [dep] ""
+    case result of
+        Left (_ :: SomeException) -> pure False
+        Right _ -> pure True
+
+setupInfrastructure :: Config -> ExceptT BlockchainError (LoggingT IO) ()
+setupInfrastructure config@Config{..} = do
+    logInfo "Setting up infrastructure..."
+    node <- initNode config
+    wallet <- initWallet config
+    hydraHead <- createHydraHead config
+    bridge <- initBridge config
+    governance <- initGovernance config
+    consensus <- initConsensus config
+    privacy <- initPrivacy config
+    security <- initSecurityModule config
+    logInfo "Infrastructure setup complete."
+
+initNode :: Config -> ExceptT BlockchainError (LoggingT IO) Node.CardanoNode
+initNode Config{..} = do
+    logInfo "Initializing Cardano node..."
+    result <- liftIO $ try $ Node.initializeNode nodeSocket networkId protocolParams
+    case result of
+        Left err -> do
+            logError $ "Failed to initialize Cardano node: " <> show (err :: SomeException)
+            throwError $ NetworkError "Failed to initialize Cardano node"
+        Right node -> do
+            logInfo "Cardano node initialized."
+            logMetric "cardano_node_initialized" 1
+            pure node
+
+initWallet :: Config -> ExceptT BlockchainError (LoggingT IO) Wallet.CardanoWallet
+initWallet Config{..} = do
+    logInfo "Initializing Cardano wallet..."
+    result <- liftIO $ try $ Wallet.initializeWallet networkId walletConfig
+    case result of
+        Left err -> do
+            logError $ "Failed to initialize Cardano wallet: " <> show (err :: SomeException)
+            throwError $ NetworkError "Failed to initialize Cardano wallet"
+        Right wallet -> do
+            logInfo "Cardano wallet initialized."
+            logMetric "cardano_wallet_initialized" 1
+            pure wallet
+
+deploySmartContracts :: Config -> ExceptT BlockchainError (LoggingT IO) ()
+deploySmartContracts config = do
+    logInfo "Deploying smart contracts..."
+    tokenSaleAddress <- deployTokenSaleContract config
+    governanceAddress <- deployGovernanceContract config
+    logInfo $ "Token sale contract deployed at: " <> show tokenSaleAddress
+    logInfo $ "Governance contract deployed at: " <> show governanceAddress
+    logMetric "smart_contracts_deployed" 1
+
+deployTokenSaleContract :: Config -> ExceptT BlockchainError (LoggingT IO) Address
+deployTokenSaleContract Config{..} = do
+    logInfo "Deploying token sale contract..."
+    result <- liftIO $ try $ CLI.deployContract networkId (contractPath </> "token_sale.plutus")
+    case result of
+        Left err -> do
+            logError $ "Failed to deploy token sale contract: " <> show (err :: SomeException)
+            throwError $ SmartContractError "Failed to deploy token sale contract"
+        Right address -> do
+            logInfo $ "Token sale contract deployed successfully."
+            pure address
+
+deployGovernanceContract :: Config -> ExceptT BlockchainError (LoggingT IO) Address
+deployGovernanceContract Config{..} = do
+    logInfo "Deploying governance contract..."
+    result <- liftIO $ try $ CLI.deployContract networkId (contractPath </> "governance.plutus")
+    case result of
+        Left err -> do
+            logError $ "Failed to deploy governance contract: " <> show (err :: SomeException)
+            throwError $ SmartContractError "Failed to deploy governance contract"
+        Right address -> do
+            logInfo $ "Governance contract deployed successfully."
+            pure address
+
+-- File: src/Blockchain/Security.hs
+
+{-# LANGUAGE OverloadedStrings #-}
+
+module Blockchain.Security where
+
+import Blockchain.Types
+import Blockchain.Error
+import Control.Monad.Except (ExceptT, throwError)
+import Crypto.KDF.PBKDF2 (pbkdf2)
+import Crypto.Hash.Algorithms (SHA256(..))
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
+
+initSecurityModule :: Config -> ExceptT BlockchainError IO SecurityModule
+initSecurityModule config = do
+    -- Initialize security module (e.g., set up encryption keys, etc.)
+    pure SecurityModule
+
+encryptSensitiveData :: SecurityModule -> BS.ByteString -> ExceptT BlockchainError IO BS.ByteString
+encryptSensitiveData SecurityModule sensitiveData = do
+    let salt = "your-secure-salt" -- In practice, use a securely generated salt
+    let iterations = 10000
+    let keyLen = 32
+    pure $ pbkdf2 SHA256 sensitiveData (TE.encodeUtf8 salt) iterations keyLen
+
+-- File: src/Blockchain/Monitoring.hs
+
+{-# LANGUAGE OverloadedStrings #-}
+
+module Blockchain.Monitoring where
+
+import Blockchain.Types
+import Blockchain.Error
+import Control.Monad.Except (ExceptT, throwError)
+import System.Metrics.Prometheus.Http.Scrape (serveMetrics)
+import System.Metrics.Prometheus.Metric.Gauge (Gauge)
+import qualified System.Metrics.Prometheus.Metric.Gauge as Gauge
+import qualified System.Metrics.Prometheus.Registry as Registry
+
+data Metrics = Metrics
+    { blockchainSetupGauge :: Gauge
+    , cardanoNodeGauge :: Gauge
+    , cardanoWalletGauge :: Gauge
+    , smartContractsGauge :: Gauge
+    }
+
+initMonitoring :: Config -> ExceptT BlockchainError IO Metrics
+initMonitoring Config{..} = do
+    registry <- liftIO Registry.new
+    blockchainSetupGauge <- liftIO $ Registry.registerGauge "blockchain_setup" registry
+    cardanoNodeGauge <- liftIO $ Registry.registerGauge "cardano_node" registry
+    cardanoWalletGauge <- liftIO $ Registry.registerGauge "cardano_wallet" registry
+    smartContractsGauge <- liftIO $ Registry.registerGauge "smart_contracts" registry
+    
+    -- Start the metrics server
+    liftIO $ serveMetrics metricsPort registry
+    
+    pure Metrics{..}
+
+logMetric :: Metrics -> String -> Double -> IO ()
+logMetric Metrics{..} metricName value = do
+    case metricName of
+        "blockchain_setup_complete" -> Gauge.set blockchainSetupGauge value
+        "cardano_node_initialized" -> Gauge.set cardanoNodeGauge value
+        "cardano_wallet_initialized" -> Gauge.set cardanoWalletGauge value
+        "smart_contracts_deployed" -> Gauge.set smartContractsGauge value
+        _ -> putStrLn $ "Unknown metric: " ++ metricName
+
+-- File: src/Blockchain/Logging.hs
+
+{-# LANGUAGE OverloadedStrings #-}
+
+module Blockchain.Logging where
+
+import Control.Monad.Logger
+import Control.Monad.IO.Class (MonadIO)
+import qualified Data.Text as T
+
+initLogging :: IO ()
+initLogging = runStdoutLoggingT $ logInfoN "Logging initialized"
+
+logInfo :: (MonadLogger m, MonadIO m) => T.Text -> m ()
+logInfo = logInfoN
+
+logError :: (MonadLogger m, MonadIO m) => T.Text -> m ()
+logError = logErrorN
+
+-- File: app/Main.hs
+
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+
+module Main where
+
+import Blockchain.Setup
+import Blockchain.Config
+import Blockchain.Error
+import Blockchain.Logging
+import Control.Monad.Except (runExceptT)
+import Control.Monad.Logger (runStdoutLoggingT)
+import Options.Applicative
+import Data.Semigroup ((<>))
+
+data Options = Options
+  { configFile :: FilePath
+  }
+
+options :: Parser Options
+options = Options
+  <$> strOption
+      ( long "config"
+     <> short 'c'
+     <> metavar "CONFIG_FILE"
+     <> help "Path to the configuration file" )
+
+main :: IO ()
+main = do
+    opts <- execParser $ info (options <**> helper) fullDesc
+    config <- loadConfig (configFile opts)
+    initLogging
+    result <- runStdoutLoggingT $ runExceptT $ setupBlockchain config
+    case result of
+        Left err -> logError $ "Error: " <> show err
+        Right _ -> logInfo "Blockchain setup and deployment successful!"
+
+-- Additional files (Blockchain.Types, Blockchain.Plutus, etc.) would be 
+-- updated to include new types and functions as necessary, building upon 
+-- the previous improvements.
