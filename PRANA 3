@@ -354,3 +354,458 @@ main = do
 -- Additional files (Blockchain.Types, Blockchain.Plutus, etc.) would be 
 -- updated to include new types and functions as necessary, building upon 
 -- the previous improvements.
+
+
+
+
+cabal run
+
+cardano-cli transaction build-raw ...
+cardano-cli transaction sign ...
+cardano-cli transaction submit ...
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+
+module Cardano.CrossChainTx 
+    ( initiateCrossChainTx
+    , completeCrossChainTx
+    , cancelCrossChainTx
+    , CrossChainDatum(..)
+    , CrossChainRedeemer(..)
+    , ChainType(..)
+    ) where
+
+import           PlutusTx.Prelude
+import qualified PlutusTx
+import           Plutus.V2.Ledger.Api
+import           Plutus.V2.Ledger.Contexts
+import qualified Plutus.Script.Utils.V2.Typed.Scripts as Scripts
+import           Plutus.Contract        as Contract
+import qualified Ledger.Ada             as Ada
+import           Data.Aeson             (FromJSON, ToJSON)
+import           GHC.Generics           (Generic)
+import           Data.Default           (Default (..))
+import           Data.Text              (Text)
+import qualified Data.Map               as Map
+import           Prelude                (IO, String, Show, print)
+import qualified Prelude                as Haskell
+
+-- Data types
+data ChainType = Cardano | Ethereum | OtherChain Text
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.makeLift ''ChainType
+
+data CrossChainDatum = CrossChainDatum
+    { sourceChain   :: ChainType
+    , targetChain   :: ChainType
+    , amount        :: Integer
+    , status        :: Text
+    }
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''CrossChainDatum
+
+data CrossChainRedeemer
+    = InitiateBridge
+    | CompleteBridge
+    | CancelBridge
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''CrossChainRedeemer
+
+-- On-chain code
+
+{-# INLINABLE mkValidator #-}
+mkValidator :: CrossChainDatum -> CrossChainRedeemer -> ScriptContext -> Bool
+mkValidator datum redeemer ctx =
+    traceIfFalse "Invalid action" $ case redeemer of
+        InitiateBridge -> True
+        CompleteBridge -> status datum == "InProgress" && checkSignature
+        CancelBridge   -> checkSignature
+  where
+    checkSignature = txSignedBy (scriptContextTxInfo ctx) $ unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx
+
+data Crossing
+instance Scripts.ValidatorTypes Crossing where
+    type instance DatumType Crossing = CrossChainDatum
+    type instance RedeemerType Crossing = CrossChainRedeemer
+
+typedValidator :: Scripts.TypedValidator Crossing
+typedValidator = Scripts.mkTypedValidator @Crossing
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @CrossChainDatum @CrossChainRedeemer
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+-- Off-chain code
+
+initiateCrossChainTx :: AsContractError e => ChainType -> ChainType -> Integer -> Contract w s e ()
+initiateCrossChainTx source target amount = do
+    let datum = CrossChainDatum
+            { sourceChain = source
+            , targetChain = target
+            , amount = amount
+            , status = "Initiated"
+            }
+        tx = Constraints.mustPayToTheScript datum (Ada.lovelaceValueOf amount)
+    void $ submitTxConstraints typedValidator tx
+
+completeCrossChainTx :: AsContractError e => TxOutRef -> CrossChainDatum -> Contract w s e ()
+completeCrossChainTx oref datum = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData CompleteBridge)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+cancelCrossChainTx :: AsContractError e => TxOutRef -> CrossChainDatum -> Contract w s e ()
+cancelCrossChainTx oref datum = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData CancelBridge)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+-- Serialization
+
+scriptSBS :: SBS.ShortByteString
+scriptSBS = SBS.toShort . LBS.toStrict $ serialise validator
+
+writeValidator :: IO ()
+writeValidator = do
+    Haskell.writeFile "cross-chain-tx.plutus" $ Haskell.show scriptSBS
+    Haskell.putStrLn "Validator written to cross-chain-tx.plutus"
+
+writeJSON :: PlutusTx.ToData a => Haskell.FilePath -> a -> IO ()
+writeJSON file = LBS.writeFile file . A.encode . Plutus.scriptDataToJson Plutus.ScriptDataJsonDetailedSchema . Plutus.dataToScriptData . PlutusTx.toData
+
+-- Main function for testing in the Plutus Playground
+runTest :: IO ()
+runTest = runEmulatorTraceIO $ do
+    h1 <- activateContractWallet (knownWallet 1) $ initiateCrossChainTx Cardano Ethereum 100000000
+    void $ waitNSlots 1
+    h2 <- activateContractWallet (knownWallet 2) completeCrossChainTx
+    void $ waitNSlots 1
+    h3 <- activateContractWallet (knownWallet 3) cancelCrossChainTx
+    void $ waitNSlots 1
+
+-- Entry point
+main :: IO ()
+main = do
+    writeValidator
+    writeJSON "datum.json" $ CrossChainDatum Cardano Ethereum 100000000 "Initiated"
+    writeJSON "redeemer-initiate.json" InitiateBridge
+    writeJSON "redeemer-complete.json" CompleteBridge
+    writeJSON "redeemer-cancel.json" CancelBridge
+    Haskell.putStrLn "Script and sample data written to files"
+
+
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+module Cardano.AdvancedBlockchain where
+
+import           PlutusTx.Prelude
+import qualified PlutusTx
+import           Plutus.V2.Ledger.Api
+import           Plutus.V2.Ledger.Contexts
+import qualified Plutus.V1.Ledger.Value as Value
+import           Ledger.Address         (PaymentPubKeyHash(..))
+import           Ledger.Typed.Scripts   as Scripts
+import qualified Plutus.Script.Utils.V2.Typed.Scripts as Scripts
+import           Plutus.Script.Utils.V2.Typed.Scripts.Validators (DatumType, RedeemerType)
+import           Plutus.Contract        as Contract
+import           Plutus.Trace.Emulator  as Emulator
+import qualified Ledger.Ada             as Ada
+import           Data.Aeson             (FromJSON, ToJSON)
+import           GHC.Generics           (Generic)
+import           Data.Default           (Default (..))
+import           Control.Monad          (void)
+import           Data.Text              (Text)
+import qualified Data.Text as T
+import qualified Data.Map               as Map
+import           Cardano.Api            (StakePoolMetadata)
+import           Ouroboros.Consensus.Cardano (CardanoBlock)
+import           Ouroboros.Consensus.Cardano.CanHardFork (CardanoHardForkConstraints)
+import           Network.HTTP.Simple
+import           Data.ByteString.Char8   (pack)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.ByteString.Short as SBS
+import           Codec.Serialise (serialise)
+import qualified Plutus.V1.Ledger.Scripts as Plutus
+import qualified Plutus.V1.Ledger.Api as Plutus
+import qualified Data.Aeson as A
+import           Prelude (IO, putStrLn, print, show, String)
+import           Control.Exception (catch, SomeException)
+import           System.IO (hPutStrLn, stderr)
+import           Data.Time.Clock (getCurrentTime)
+import           Data.Time.Format (formatTime, defaultTimeLocale)
+
+-- Hypothetical modules for P2P and privacy features
+-- Note: These are placeholders and would need actual implementations
+import           Network.Tor.Circuit    (createCircuit, extendCircuit)
+import           Network.Onion.Routing  (createOnionPacket, unwrapOnionPacket)
+import           Crypto.PubKey.Ed25519  (generateKeyPair, sign, verify)
+
+-- RDF data types and functions
+data RDFTriple = RDFTriple {
+    subject :: Text,
+    predicate :: Text,
+    obj :: Text
+} deriving (Show, Eq, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+type RDFGraph = [RDFTriple]
+
+-- Enhanced data types for cross-chain performance and P2P communication
+data ChainType = Cardano | Ethereum | OtherChain Text
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''ChainType
+
+data PerformanceMetrics = PerformanceMetrics
+    { tps           :: Integer
+    , latency       :: Integer
+    , finality      :: Integer
+    , energyUsage   :: Integer
+    , cost          :: Integer
+    , reliability   :: Integer
+    }
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+data P2PNode = P2PNode
+    { nodeId        :: BuiltinByteString
+    , publicKey     :: BuiltinByteString
+    , onionAddress  :: Text
+    }
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''P2PNode
+
+data CrossChainDatum = CrossChainDatum
+    { sourceChain   :: ChainType
+    , targetChain   :: ChainType
+    , amount        :: Integer
+    , metrics       :: PerformanceMetrics
+    , status        :: BridgeStatus
+    , initiator     :: P2PNode
+    , recipient     :: P2PNode
+    , rdfMetadata   :: RDFGraph
+    }
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''CrossChainDatum
+
+data BridgeStatus = Initiated | InProgress | Completed | Failed
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''BridgeStatus
+
+data CrossChainRedeemer
+    = InitiateBridge
+    | UpdateMetrics PerformanceMetrics
+    | UpdateRDFMetadata RDFGraph
+    | CompleteBridge
+    | CancelBridge
+    deriving (Show, Generic, FromJSON, ToJSON)
+PlutusTx.unstableMakeIsData ''CrossChainRedeemer
+
+-- Validator script for cross-chain transactions
+{-# INLINABLE mkValidator #-}
+mkValidator :: CrossChainDatum -> CrossChainRedeemer -> ScriptContext -> Bool
+mkValidator datum redeemer ctx =
+    case redeemer of
+        InitiateBridge -> validateInitiation datum ctx
+        UpdateMetrics newMetrics -> validateMetricsUpdate datum newMetrics ctx
+        UpdateRDFMetadata newRDFMetadata -> validateRDFMetadataUpdate datum newRDFMetadata ctx
+        CompleteBridge -> validateCompletion datum ctx
+        CancelBridge -> validateCancellation datum ctx
+
+validateInitiation :: CrossChainDatum -> ScriptContext -> Bool
+validateInitiation datum ctx = 
+    traceIfFalse "Invalid initiation" $ 
+        txSignedBy (scriptContextTxInfo ctx) (unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx) &&
+        status datum == Initiated
+
+validateMetricsUpdate :: CrossChainDatum -> PerformanceMetrics -> ScriptContext -> Bool
+validateMetricsUpdate datum newMetrics ctx =
+    traceIfFalse "Invalid metrics update" $
+        txSignedBy (scriptContextTxInfo ctx) (unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx) &&
+        status datum == InProgress
+
+validateRDFMetadataUpdate :: CrossChainDatum -> RDFGraph -> ScriptContext -> Bool
+validateRDFMetadataUpdate datum newRDFMetadata ctx =
+    traceIfFalse "Invalid RDF metadata update" $
+        txSignedBy (scriptContextTxInfo ctx) (unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx) &&
+        status datum == InProgress
+
+validateCompletion :: CrossChainDatum -> ScriptContext -> Bool
+validateCompletion datum ctx =
+    traceIfFalse "Invalid completion" $
+        txSignedBy (scriptContextTxInfo ctx) (unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx) &&
+        status datum == InProgress
+
+validateCancellation :: CrossChainDatum -> ScriptContext -> Bool
+validateCancellation datum ctx =
+    traceIfFalse "Invalid cancellation" $
+        txSignedBy (scriptContextTxInfo ctx) (unPaymentPubKeyHash $ ownPaymentPubKeyHash ctx) &&
+        (status datum == Initiated || status datum == InProgress)
+
+-- Boilerplate
+data Crossing
+instance Scripts.ValidatorTypes Crossing where
+    type instance DatumType Crossing = CrossChainDatum
+    type instance RedeemerType Crossing = CrossChainRedeemer
+
+typedValidator :: Scripts.TypedValidator Crossing
+typedValidator = Scripts.mkTypedValidator @Crossing
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @CrossChainDatum @CrossChainRedeemer
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+-- Off-chain code for P2P communication and cross-chain transactions
+data P2PState = P2PState
+    { circuits :: [Circuit]
+    , pendingTransactions :: Map.Map TxId CrossChainDatum
+    , rdfStore :: RDFGraph
+    }
+
+initP2PNode :: AsContractError e => Contract w s e P2PNode
+initP2PNode = do
+    (pubKey, privKey) <- liftIO generateKeyPair
+    nodeId <- liftIO generateNodeId
+    onionAddr <- liftIO generateOnionAddress
+    return $ P2PNode
+        { nodeId = nodeId
+        , publicKey = pubKey
+        , onionAddress = onionAddr
+        }
+
+createP2PCircuit :: AsContractError e => [P2PNode] -> Contract w P2PState e Circuit
+createP2PCircuit relays = do
+    circuit <- liftIO $ createCircuit relays
+    state <- get @P2PState
+    put $ state { circuits = circuit : circuits state }
+    return circuit
+
+initiateCrossChainTx :: AsContractError e => ChainType -> ChainType -> Integer -> P2PNode -> P2PNode -> RDFGraph -> Contract w P2PState e ()
+initiateCrossChainTx source target amount initiator recipient rdfMetadata = do
+    now <- currentTime
+    let datum = CrossChainDatum
+            { sourceChain = source
+            , targetChain = target
+            , amount = amount
+            , metrics = PerformanceMetrics 0 0 0 0 0 0
+            , status = Initiated
+            , initiator = initiator
+            , recipient = recipient
+            , rdfMetadata = rdfMetadata
+            }
+        txConstraints = Constraints.mustPayToTheScript datum (Ada.lovelaceValueOf 2000000)
+    void $ submitTxConstraints typedValidator txConstraints
+    
+    -- Create onion-routed message for the recipient
+    circuit <- createP2PCircuit [recipient]
+    message <- liftIO $ createOnionPacket circuit "Initiate cross-chain transaction"
+    sendP2PMessage (onionAddress recipient) message
+    
+    -- Update local RDF store
+    updateRDFStore rdfMetadata
+
+updateMetrics :: AsContractError e => TxOutRef -> CrossChainDatum -> PerformanceMetrics -> Contract w P2PState e ()
+updateMetrics oref datum newMetrics = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData $ UpdateMetrics newMetrics)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+updateRDFMetadata :: AsContractError e => TxOutRef -> CrossChainDatum -> RDFGraph -> Contract w P2PState e ()
+updateRDFMetadata oref datum newRDFMetadata = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData $ UpdateRDFMetadata newRDFMetadata)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+completeCrossChainTx :: AsContractError e => TxOutRef -> CrossChainDatum -> Contract w P2PState e ()
+completeCrossChainTx oref datum = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData CompleteBridge)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+cancelCrossChainTx :: AsContractError e => TxOutRef -> CrossChainDatum -> Contract w P2PState e ()
+cancelCrossChainTx oref datum = do
+    let lookups = Constraints.unspentOutputs (Map.singleton oref $ TxOutTx undefined $ TxOut undefined undefined undefined Nothing)
+                <> Constraints.otherScript validator
+        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData CancelBridge)
+                <> Constraints.mustValidateIn (to $ POSIXTime 1596059091000)
+    void $ submitTxConstraintsWith @Crossing lookups tx
+
+-- P2P message handling
+handleP2PMessage :: AsContractError e => BuiltinByteString -> Contract w P2PState e ()
+handleP2PMessage message = do
+    unwrappedMessage <- liftIO $ unwrapOnionPacket message
+    case unwrappedMessage of
+        "Initiate cross-chain transaction" -> handleInitiation
+        "Update metrics" -> handleMetricsUpdate
+        "Update RDF metadata" -> handleRDFMetadataUpdate
+        "Complete transaction" -> handleCompletion
+        _ -> throwError "Unknown P2P message"
+
+-- Implement message handlers (placeholder implementations)
+handleInitiation :: AsContractError e => Contract w P2PState e ()
+handleInitiation = do
+    logInfo @String "Handling initiation message"
+    -- Implement initiation logic
+
+handleMetricsUpdate :: AsContractError e => Contract w P2PState e ()
+handleMetricsUpdate = do
+    logInfo @String "Handling metrics update message"
+    -- Implement metrics update logic
+
+handleRDFMetadataUpdate :: AsContractError e => Contract w P2PState e ()
+handleRDFMetadataUpdate = do
+    logInfo @String "Handling RDF metadata update message"
+    -- Implement RDF metadata update logic
+
+handleCompletion :: AsContractError e => Contract w P2PState e ()
+handleCompletion = do
+    logInfo @String "Handling completion message"
+    -- Implement completion logic
+
+-- RDF-related functions
+updateRDFStore :: AsContractError e => RDFGraph -> Contract w P2PState e ()
+updateRDFStore newTriples = do
+    state <- get @P2PState
+    let updatedStore = mergeRDFGraphs (rdfStore state) newTriples
+    put $ state { rdfStore = updatedStore }
+
+mergeRDFGraphs :: RDFGraph -> RDFGraph -> R
