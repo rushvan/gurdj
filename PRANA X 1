@@ -4763,6 +4763,5332 @@ ChatGPT says: Certainly, let's delve into more advanced topics related to Cardan
 
 
 
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+{-# LANGUAGE FlexibleContexts #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE TypeFamilies #-}
+
+{-# LANGUAGE TypeOperators #-}
+
+
+module RDFContract where
+
+
+import PlutusTx.Prelude
+
+import Ledger
+
+import Ledger.Typed.Scripts
+
+import PlutusTx
+
+import Plutus.Contract as Contract
+
+import Plutus.Trace.Emulator as Emulator
+
+import Prelude (IO, Show (..), String)
+
+import Wallet.Emulator.Wallet
+
+import Control.Monad.Freer.Extras as Extras
+
+import Data.Aeson (ToJSON, FromJSON)
+
+import GHC.Generics (Generic)
+
+import qualified Data.ByteString.Char8 as C
+
+
+-- Define RDF Triple as Datum
+
+data RDFTriple = RDFTriple
+
+    { subject :: BuiltinByteString
+
+    , predicate :: BuiltinByteString
+
+    , obj :: BuiltinByteString
+
+    } deriving Show
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+-- Validator logic to verify an RDF triple with enhanced validation
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: RDFTriple -> () -> ScriptContext -> Bool
+
+mkValidator datum _ _ = 
+
+    traceIfFalse "Invalid RDF triple" (validateTriple datum)
+
+
+-- Enhanced validation logic for RDF triples
+
+validateTriple :: RDFTriple -> Bool
+
+validateTriple (RDFTriple subj pred obj) =
+
+    lengthOfByteString subj > 0 &&
+
+    lengthOfByteString pred > 0 &&
+
+    lengthOfByteString obj > 0 &&
+
+    isValidURI subj &&
+
+    isValidURI pred &&
+
+    isValidURI obj
+
+
+-- Simple URI validation function (for demonstration purposes)
+
+isValidURI :: BuiltinByteString -> Bool
+
+isValidURI uri = C.isPrefixOf "http://" (C.pack $ show uri) || C.isPrefixOf "https://" (C.pack $ show uri)
+
+
+data RDFContract
+
+instance Scripts.ValidatorTypes RDFContract where
+
+    type instance DatumType RDFContract = RDFTriple
+
+    type instance RedeemerType RDFContract = ()
+
+
+typedValidator :: Scripts.TypedValidator RDFContract
+
+typedValidator = Scripts.mkTypedValidator @RDFContract
+
+    $$(PlutusTx.compile [|| mkValidator ||])
+
+    $$(PlutusTx.compile [|| wrap ||])
+
+  where
+
+    wrap = Scripts.wrapValidator @RDFTriple @()
+
+
+validator :: Validator
+
+validator = Scripts.validatorScript typedValidator
+
+
+valHash :: Ledger.ValidatorHash
+
+valHash = Scripts.validatorHash typedValidator
+
+
+scrAddress :: Ledger.Address
+
+scrAddress = scriptAddress validator
+
+
+-- Off-Chain Code: Define endpoints for storing and querying triples.
+
+type RDFSchema =
+
+        Endpoint "store" RDFTriple
+
+    .\/ Endpoint "query" ()
+
+
+-- Store an RDF triple on the blockchain.
+
+storeTriple :: AsContractError e => RDFTriple -> Contract () RDFSchema e ()
+
+storeTriple triple = do
+
+    let tx = Constraints.mustPayToTheScript triple mempty -- No ADA transfer needed for storage-only operation.
+
+    ledgerTx <- submitTxConstraints typedValidator tx
+
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+    Extras.logInfo @String $ "Stored triple: " ++ show triple
+
+
+-- Query stored triples (for demonstration, simply logs the action)
+
+queryTriples :: AsContractError e => Contract () RDFSchema e ()
+
+queryTriples = do
+
+    utxos <- utxosAt scrAddress
+
+    let triples = map (\(_, o) -> case _ciTxOutDatum o of Just (Datum d) -> PlutusTx.fromBuiltinData d) $ Map.toList utxos 
+
+    Extras.logInfo @String $ "Queried triples: " ++ show triples
+
+
+endpoints :: Contract () RDFSchema Text ()
+
+endpoints = awaitPromise (store `select` query)
+
+  where 
+
+    store = endpoint @"store" storeTriple
+
+    query = endpoint @"query" >> queryTriples
+
+
+-- Run the contract in the emulator.
+
+testDeployment :: IO ()
+
+testDeployment = runEmulatorTraceIO $ do
+
+    h <- activateContractWallet (knownWallet 1) endpoints
+
+
+    -- Example of storing an RDF triple.
+
+    let exampleTriple1 = RDFTriple "http://example.com/subject1" "http://example.com/predicate1" "http://example.com/object1"
+
+        exampleTriple2 = RDFTriple "https://example.com/subject2" "https://example.com/predicate2" "https://example.com/object2"
+
+        
+
+    callEndpoint @"store" h exampleTriple1 
+
+    void $ Emulator.waitNSlots 1 
+
+
+    callEndpoint @"store" h exampleTriple2 
+
+    void $ Emulator.waitNSlots 1 
+
+
+    callEndpoint @"query" h ()
+
+    void $ Emulator.waitNSlots 1 
+
+
+
+
+
+
+
+
+{-# LANGUAGE DataKinds #-} {-# LANGUAGE NoImplicitPrelude #-} {-# LANGUAGE TemplateHaskell #-} {-# LANGUAGE ScopedTypeVariables #-} {-# LANGUAGE OverloadedStrings #-} module AdvancedContract where import PlutusTx.Prelude import Ledger import Ledger.Constraints as Constraints import Ledger.Typed.Scripts import Plutus.Contract import PlutusTx import Prelude (IO, Show (..), String, Semigroup (..)) -- Define a simple data type for the contract data AdvancedDatum = AdvancedDatum { datumValue :: Integer } PlutusTx.unstableMakeIsData ''AdvancedDatum -- Define a validator script {-# INLINABLE mkValidator #-} mkValidator :: AdvancedDatum -> Integer -> ScriptContext -> Bool mkValidator datum redeemer _ = traceIfFalse "Insufficient funds" (datumValue datum >= redeemer) data Advanced instance Scripts.ValidatorTypes Advanced where type instance DatumType Advanced = AdvancedDatum type instance RedeemerType Advanced = Integer typedValidator :: Scripts.TypedValidator Advanced typedValidator = Scripts.mkTypedValidator @Advanced $$(PlutusTx.compile [|| mkValidator ||]) $$(PlutusTx.compile [|| wrap ||]) where wrap = Scripts.wrapValidator @AdvancedDatum @Integer validator :: Validator validator = Scripts.validatorScript typedValidator valHash :: Ledger.ValidatorHash valHash = Scripts.validatorHash typedValidator scrAddress :: Ledger.Address scrAddress = scriptAddress validator
+
+
+
+{-# LANGUAGE DataKinds #-} {-# LANGUAGE DeriveGeneric #-} {-# LANGUAGE FlexibleContexts #-} {-# LANGUAGE NoImplicitPrelude #-} {-# LANGUAGE OverloadedStrings #-} {-# LANGUAGE TemplateHaskell #-} {-# LANGUAGE TypeApplications #-} {-# LANGUAGE TypeFamilies #-} {-# LANGUAGE TypeOperators #-} module AdvancedContractPAB where import Control.Monad.Freer.Extras as Extras import Data.Aeson (ToJSON, FromJSON) import GHC.Generics (Generic) import Ledger import Ledger.Constraints as Constraints import Plutus.Contract as Contract import Plutus.Trace.Emulator as Emulator import PlutusTx.Prelude import Prelude (IO, Show (..), String) import Wallet.Emulator.Wallet -- Define a contract schema type AdvancedSchema = Endpoint "deposit" Integer .\/ Endpoint "withdraw" Integer .\/ Endpoint "queryBalance" () -- Define the contract logic for depositing depositFunds :: AsContractError e => Integer -> Contract () AdvancedSchema e () depositFunds amount = do let datum = AdvancedDatum { datumValue = amount } tx = Constraints.mustPayToTheScript datum (Ada.lovelaceValueOf amount) ledgerTx <- submitTxConstraints typedValidator tx void $ awaitTxConfirmed $ getCardanoTxId ledgerTx Extras.logInfo @String $ "Deposited: " ++ show amount -- Define the contract logic for withdrawing withdrawFunds :: AsContractError e => Integer -> Contract () AdvancedSchema e () withdrawFunds amount = do utxos <- utxosAt scrAddress let tx = collectFromScript utxos amount ledgerTx <- submitTxConstraintsSpending typedValidator utxos tx void $ awaitTxConfirmed $ getCardanoTxId ledgerTx Extras.logInfo @String $ "Withdrew: " ++ show amount -- Define the contract logic for querying balance queryBalance :: AsContractError e => Contract () AdvancedSchema e () queryBalance = do utxos <- utxosAt scrAddress let totalBalance = sum $ map (datumValue . fst) $ mapMaybe (datumAt . snd) $ Map.toList utxos Extras.logInfo @String $ "Current balance: " ++ show totalBalance endpoints :: Contract () AdvancedSchema Text () endpoints = selectList [deposit, withdraw, query] where deposit = endpoint @"deposit" >>= depositFunds withdraw = endpoint @"withdraw" >>= withdrawFunds query = endpoint @"queryBalance" >> queryBalance -- Run the contract in the emulator testDeployment :: IO () testDeployment = runEmulatorTraceIO $ do h <- activateContractWallet (knownWallet 1) endpoints callEndpoint @"deposit" h 1000000 void $ Emulator.waitNSlots 1 callEndpoint @"withdraw" h 500000 void $ Emulator.waitNSlots 1 callEndpoint @"queryBalance" h () void $ Emulator.waitNSlots 1
+
+
+
+-- Continue from the above code testDeployment :: IO () testDeployment = runEmulatorTraceIO $ do h <- activateContractWallet (knownWallet 1) endpoints callEndpoint @"deposit" h 1000000 void $ Emulator.waitNSlots 1 callEndpoint @"withdraw" h 500000 void $ Emulator.waitNSlots 1
+
+
+
+-- Example Haskell code to interact with a Cardano node -- Note: This requires the `cardano-api` library and a running Cardano node -- This code is illustrative; actual implementation requires detailed setup import Cardano.Api import Cardano.Api.Shelley -- Example function to submit a transaction submitTransaction :: FilePath -> IO () submitTransaction txFile = do -- Load the transaction from the file tx <- readFileTextEnvelope (AsTx AsShelley) txFile case tx of Left err -> putStrLn $ "Error reading transaction: " ++ displayError err Right txBody -> do -- Submit the transaction to the Cardano node let txSubmit = TxSubmitApiTx txBody -- runTxSubmit txSubmit -- This would require a proper setup and connection to a node
+
+
+
+
+-- Continue from the above code testDeployment :: IO () testDeployment = runEmulatorTraceIO $ do h <- activateContractWallet (knownWallet 1) endpoints callEndpoint @"deposit" h 1000000 void $ Emulator.waitNSlots 1 callEndpoint @"withdraw" h 500000 void $ Emulator.waitNSlots 1 callEndpoint @"queryBalance" h () void $ Emulator.waitNSlots 1
+
+
+
+
+
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+
+-- Data structures
+
+data RDFTriple = RDFTriple 
+
+    { subject :: Text
+
+    , predicate :: Text
+
+    , obj :: Text 
+
+    } deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data PerformanceMetrics = PerformanceMetrics 
+
+    { tps :: Integer
+
+    , latency :: Integer 
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data P2PNode = P2PNode 
+
+    { nodeId :: BuiltinByteString
+
+    , reputation :: Integer 
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainData = BlockchainData 
+
+    { metrics :: PerformanceMetrics
+
+    , nodes :: [P2PNode]
+
+    , rdfGraph :: RDFGraph 
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+-- Validator logic
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> () -> ScriptContext -> Bool
+
+mkValidator bd _ _ =
+
+    traceIfFalse "Insufficient TPS" (tps (metrics bd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics bd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes bd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph bd)
+
+
+data Blockchain
+
+instance Scripts.ValidatorTypes Blockchain where
+
+    type instance DatumType Blockchain = BlockchainData
+
+    type instance RedeemerType Blockchain = ()
+
+
+typedValidator :: Scripts.TypedValidator Blockchain
+
+typedValidator = Scripts.mkTypedValidator @Blockchain
+
+    $$(PlutusTx.compile [|| mkValidator ||])
+
+    $$(PlutusTx.compile [|| wrap ||])
+
+  where
+
+    wrap = Scripts.wrapValidator @BlockchainData @()
+
+
+validator :: Validator
+
+validator = Scripts.validatorScript typedValidator
+
+
+scrAddress :: Ledger.Address
+
+scrAddress = scriptAddress validator
+
+
+-- Contract endpoints
+
+type AdvancedBlockchainSchema =
+
+    Endpoint "submit" BlockchainData
+
+
+submit :: AsContractError e => BlockchainData -> Contract w s e ()
+
+submit bd = do
+
+    let tx = mustPayToTheScript bd $ Ada.lovelaceValueOf 2000000  -- Minimum UTxO value
+
+    ledgerTx <- submitTxConstraints typedValidator tx
+
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+    logInfo @String $ "Submitted blockchain data: " ++ show bd
+
+
+endpoints :: Contract () AdvancedBlockchainSchema Text ()
+
+endpoints = awaitPromise (endpoint @"submit" submit) >> endpoints
+
+
+mkSchemaDefinitions ''AdvancedBlockchainSchema
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# LANGUAGE ScopedTypeVariables #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import qualified Ledger.Value as Value
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+import qualified Data.Map as Map
+
+import Control.Monad (void)
+
+
+-- Enhanced data structures
+
+data RDFTriple = RDFTriple 
+
+    { subject :: BuiltinByteString
+
+    , predicate :: BuiltinByteString
+
+    , obj :: BuiltinByteString 
+
+    } deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data PerformanceMetrics = PerformanceMetrics 
+
+    { tps :: Integer
+
+    , latency :: Integer
+
+    , blockSize :: Integer
+
+    , memPoolSize :: Integer
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data P2PNode = P2PNode 
+
+    { nodeId :: BuiltinByteString
+
+    , reputation :: Integer
+
+    , lastSeen :: POSIXTime
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainState = Initializing | Active | Upgrading | Maintenance
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainState
+
+
+data BlockchainData = BlockchainData 
+
+    { metrics :: PerformanceMetrics
+
+    , nodes :: [P2PNode]
+
+    , rdfGraph :: RDFGraph
+
+    , state :: BlockchainState
+
+    , version :: BuiltinByteString
+
+    , lastUpdate :: POSIXTime
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+-- Enhanced validator logic
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> BuiltinData -> ScriptContext -> Bool
+
+mkValidator bd action ctx = 
+
+    case PlutusTx.fromBuiltinData action of
+
+        Just (Update newBd) -> validateUpdate bd newBd ctx
+
+        Just (Withdraw amt) -> validateWithdraw bd amt ctx
+
+        Nothing             -> traceError "Invalid action"
+
+
+{-# INLINABLE validateUpdate #-}
+
+validateUpdate :: BlockchainData -> BlockchainData -> ScriptContext -> Bool
+
+validateUpdate oldBd newBd ctx =
+
+    traceIfFalse "Insufficient TPS" (tps (metrics newBd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics newBd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes newBd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph newBd) &&
+
+    traceIfFalse "Invalid state transition" (validStateTransition (state oldBd) (state newBd)) &&
+
+    traceIfFalse "Version downgrade not allowed" (version newBd >= version oldBd) &&
+
+    traceIfFalse "Invalid timestamp" (lastUpdate newBd > lastUpdate oldBd) &&
+
+    traceIfFalse "Unauthorized update" (txSignedBy (scriptContextTxInfo ctx) (adminPubKeyHash ctx))
+
+
+{-# INLINABLE validateWithdraw #-}
+
+validateWithdraw :: BlockchainData -> Integer -> ScriptContext -> Bool
+
+validateWithdraw _ amt ctx =
+
+    traceIfFalse "Insufficient funds" (Ada.fromValue (valueSpent info) >= Ada.lovelaceOf amt) &&
+
+    traceIfFalse "Unauthorized withdrawal" (txSignedBy info (adminPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validStateTransition #-}
+
+validStateTransition :: BlockchainState -> BlockchainState -> Bool
+
+validStateTransition Initializing Active = True
+
+validStateTransition Active Upgrading = True
+
+validStateTransition Upgrading Active = True
+
+validStateTransition Active Maintenance = True
+
+validStateTransition Maintenance Active = True
+
+validStateTransition s1 s2 = s1 == s2
+
+
+{-# INLINABLE adminPubKeyHash #-}
+
+adminPubKeyHash :: ScriptContext -> PubKeyHash
+
+adminPubKeyHash = undefined  -- Replace with actual admin public key hash
+
+
+data BlockchainAction = Update BlockchainData | Withdraw Integer
+
+PlutusTx.unstableMakeIsData ''BlockchainAction
+
+
+data Blockchain
+
+instance Scripts.ValidatorTypes Blockchain where
+
+    type instance DatumType Blockchain = BlockchainData
+
+    type instance RedeemerType Blockchain = BlockchainAction
+
+
+typedValidator :: Scripts.TypedValidator Blockchain
+
+typedValidator = Scripts.mkTypedValidator @Blockchain
+
+    $$(PlutusTx.compile [|| mkValidator ||])
+
+    $$(PlutusTx.compile [|| wrap ||])
+
+  where
+
+    wrap = Scripts.wrapValidator @BlockchainData @BlockchainAction
+
+
+validator :: Validator
+
+validator = Scripts.validatorScript typedValidator
+
+
+scrAddress :: Ledger.Address
+
+scrAddress = scriptAddress validator
+
+
+-- Enhanced contract endpoints
+
+data BlockchainContractParams = BlockchainContractParams
+
+    { bcpMinAda :: Ada.Ada
+
+    , bcpAdminPKH :: PubKeyHash
+
+    }
+
+
+type AdvancedBlockchainSchema =
+
+    Endpoint "initialize" BlockchainData
+
+    .\/ Endpoint "update" BlockchainData
+
+    .\/ Endpoint "withdraw" Integer
+
+
+initialize :: AsContractError e => BlockchainContractParams -> BlockchainData -> Contract w s e ()
+
+initialize params bd = do
+
+    let tx = mustPayToTheScript bd $ Ada.toValue (bcpMinAda params)
+
+    ledgerTx <- submitTxConstraints typedValidator tx
+
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+    logInfo @String $ "Initialized blockchain with data: " ++ show bd
+
+
+update :: AsContractError e => BlockchainContractParams -> BlockchainData -> Contract w s e ()
+
+update params newBd = do
+
+    utxos <- utxosAt scrAddress
+
+    case Map.keys utxos of
+
+        []       -> logError @String "No UTxO found at script address"
+
+        oref : _ -> do
+
+            let lookups = Constraints.unspentOutputs utxos <>
+
+                          Constraints.plutusV2OtherScript validator
+
+                redeemerUpdate = Redeemer $ PlutusTx.toBuiltinData $ Update newBd
+
+                tx      = mustSpendScriptOutput oref redeemerUpdate <>
+
+                          mustPayToTheScript newBd (Ada.toValue $ bcpMinAda params)
+
+            ledgerTx <- submitTxConstraintsWith @Blockchain lookups tx
+
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+            logInfo @String $ "Updated blockchain data: " ++ show newBd
+
+
+withdraw :: AsContractError e => BlockchainContractParams -> Integer -> Contract w s e ()
+
+withdraw params amt = do
+
+    utxos <- utxosAt scrAddress
+
+    case Map.keys utxos of
+
+        []       -> logError @String "No UTxO found at script address"
+
+        oref : _ -> do
+
+            let lookups = Constraints.unspentOutputs utxos <>
+
+                          Constraints.plutusV2OtherScript validator
+
+                redeemerWithdraw = Redeemer $ PlutusTx.toBuiltinData $ Withdraw amt
+
+                tx      = mustSpendScriptOutput oref redeemerWithdraw <>
+
+                          mustPayToPubKey (bcpAdminPKH params) (Ada.lovelaceValueOf amt)
+
+            ledgerTx <- submitTxConstraintsWith @Blockchain lookups tx
+
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+            logInfo @String $ "Withdrawn " ++ show amt ++ " lovelace"
+
+
+endpoints :: BlockchainContractParams -> Contract () AdvancedBlockchainSchema Text ()
+
+endpoints params = forever
+
+    $ handleError logError
+
+    $ awaitPromise
+
+    $ initialize' `select` update' `select` withdraw'
+
+  where
+
+    initialize' = endpoint @"initialize" (initialize params)
+
+    update'     = endpoint @"update" (update params)
+
+    withdraw'   = endpoint @"withdraw" (withdraw params)
+
+
+mkSchemaDefinitions ''AdvancedBlockchainSchema
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-# LANGUAGE RecordWildCards #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import qualified Ledger.Value as Value
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+import qualified Data.Map as Map
+
+import Control.Monad (void)
+
+import Data.Text (Text)
+
+import qualified Plutus.V1.Ledger.Interval as Interval
+
+
+-- Enhanced data structures
+
+data RDFTriple = RDFTriple 
+
+    { subject :: BuiltinByteString
+
+    , predicate :: BuiltinByteString
+
+    , obj :: BuiltinByteString 
+
+    } deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data PerformanceMetrics = PerformanceMetrics 
+
+    { tps :: Integer
+
+    , latency :: Integer
+
+    , blockSize :: Integer
+
+    , memPoolSize :: Integer
+
+    , networkHashRate :: Integer
+
+    , activeStakePools :: Integer
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data NodeRole = Relay | CoreNode | SPO
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''NodeRole
+
+
+data P2PNode = P2PNode 
+
+    { nodeId :: BuiltinByteString
+
+    , reputation :: Integer
+
+    , lastSeen :: POSIXTime
+
+    , role :: NodeRole
+
+    , stake :: Integer
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainState = Initializing | Active | Upgrading | Maintenance | Emergency
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainState
+
+
+data GovernanceProposal = GovernanceProposal
+
+    { proposalId :: BuiltinByteString
+
+    , proposer :: PubKeyHash
+
+    , description :: BuiltinByteString
+
+    , votingPeriod :: (POSIXTime, POSIXTime)
+
+    , requiredMajority :: Rational
+
+    , votes :: [(PubKeyHash, Bool)]
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''GovernanceProposal
+
+
+data BlockchainData = BlockchainData 
+
+    { metrics :: PerformanceMetrics
+
+    , nodes :: [P2PNode]
+
+    , rdfGraph :: RDFGraph
+
+    , state :: BlockchainState
+
+    , version :: BuiltinByteString
+
+    , lastUpdate :: POSIXTime
+
+    , totalStake :: Integer
+
+    , treasuryBalance :: Integer
+
+    , activeProposals :: [GovernanceProposal]
+
+    , protocolParameters :: BuiltinData
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+-- Enhanced validator logic
+
+data BlockchainAction 
+
+    = Update BlockchainData
+
+    | Withdraw Integer
+
+    | ProposeGovernance GovernanceProposal
+
+    | Vote BuiltinByteString Bool -- proposalId and vote
+
+    | ExecuteProposal BuiltinByteString -- proposalId
+
+    | EmergencyShutdown
+
+    | RestoreFromEmergency
+
+
+PlutusTx.unstableMakeIsData ''BlockchainAction
+
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> BlockchainAction -> ScriptContext -> Bool
+
+mkValidator bd action ctx = case action of
+
+    Update newBd -> validateUpdate bd newBd ctx
+
+    Withdraw amt -> validateWithdraw bd amt ctx
+
+    ProposeGovernance proposal -> validateProposal bd proposal ctx
+
+    Vote proposalId vote -> validateVote bd proposalId vote ctx
+
+    ExecuteProposal proposalId -> validateExecuteProposal bd proposalId ctx
+
+    EmergencyShutdown -> validateEmergencyShutdown bd ctx
+
+    RestoreFromEmergency -> validateRestoreFromEmergency bd ctx
+
+
+{-# INLINABLE validateUpdate #-}
+
+validateUpdate :: BlockchainData -> BlockchainData -> ScriptContext -> Bool
+
+validateUpdate oldBd newBd ctx =
+
+    traceIfFalse "Insufficient TPS" (tps (metrics newBd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics newBd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes newBd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph newBd) &&
+
+    traceIfFalse "Invalid state transition" (validStateTransition (state oldBd) (state newBd)) &&
+
+    traceIfFalse "Version downgrade not allowed" (version newBd >= version oldBd) &&
+
+    traceIfFalse "Invalid timestamp" (lastUpdate newBd > lastUpdate oldBd) &&
+
+    traceIfFalse "Unauthorized update" (txSignedBy (scriptContextTxInfo ctx) (adminPubKeyHash ctx)) &&
+
+    traceIfFalse "Invalid total stake" (totalStake newBd >= totalStake oldBd) &&
+
+    traceIfFalse "Treasury balance decreased" (treasuryBalance newBd >= treasuryBalance oldBd)
+
+
+{-# INLINABLE validateWithdraw #-}
+
+validateWithdraw :: BlockchainData -> Integer -> ScriptContext -> Bool
+
+validateWithdraw bd amt ctx =
+
+    traceIfFalse "Insufficient funds" (Ada.fromValue (valueSpent info) >= Ada.lovelaceOf amt) &&
+
+    traceIfFalse "Unauthorized withdrawal" (txSignedBy info (adminPubKeyHash ctx)) &&
+
+    traceIfFalse "Exceeds treasury balance" (amt <= treasuryBalance bd)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateProposal #-}
+
+validateProposal :: BlockchainData -> GovernanceProposal -> ScriptContext -> Bool
+
+validateProposal bd proposal ctx =
+
+    traceIfFalse "Invalid proposer" (txSignedBy info (proposer proposal)) &&
+
+    traceIfFalse "Invalid voting period" (validateVotingPeriod (votingPeriod proposal)) &&
+
+    traceIfFalse "Duplicate proposal" (not $ elem (proposalId proposal) (map proposalId (activeProposals bd)))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateVote #-}
+
+validateVote :: BlockchainData -> BuiltinByteString -> Bool -> ScriptContext -> Bool
+
+validateVote bd proposalId vote ctx =
+
+    traceIfFalse "Invalid proposal" (isJust proposal) &&
+
+    traceIfFalse "Voting period ended" (validateVotingPeriod (votingPeriod $ fromJust proposal)) &&
+
+    traceIfFalse "Already voted" (not $ elem (signingPubKeyHash, vote) (votes $ fromJust proposal))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    signingPubKeyHash = case txSignedBy info of
+
+        Nothing -> traceError "No signature"
+
+        Just pkh -> pkh
+
+    proposal = find (\p -> proposalId == proposalId p) (activeProposals bd)
+
+
+{-# INLINABLE validateExecuteProposal #-}
+
+validateExecuteProposal :: BlockchainData -> BuiltinByteString -> ScriptContext -> Bool
+
+validateExecuteProposal bd proposalId ctx =
+
+    traceIfFalse "Invalid proposal" (isJust proposal) &&
+
+    traceIfFalse "Voting period not ended" (not $ validateVotingPeriod (votingPeriod $ fromJust proposal)) &&
+
+    traceIfFalse "Insufficient votes" (calculateVotePercentage (votes $ fromJust proposal) >= requiredMajority (fromJust proposal)) &&
+
+    traceIfFalse "Unauthorized execution" (txSignedBy info (adminPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    proposal = find (\p -> proposalId == proposalId p) (activeProposals bd)
+
+
+{-# INLINABLE validateEmergencyShutdown #-}
+
+validateEmergencyShutdown :: BlockchainData -> ScriptContext -> Bool
+
+validateEmergencyShutdown bd ctx =
+
+    traceIfFalse "Already in emergency state" (state bd /= Emergency) &&
+
+    traceIfFalse "Unauthorized emergency shutdown" (txSignedBy info (adminPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateRestoreFromEmergency #-}
+
+validateRestoreFromEmergency :: BlockchainData -> ScriptContext -> Bool
+
+validateRestoreFromEmergency bd ctx =
+
+    traceIfFalse "Not in emergency state" (state bd == Emergency) &&
+
+    traceIfFalse "Unauthorized restoration" (txSignedBy info (adminPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validStateTransition #-}
+
+validStateTransition :: BlockchainState -> BlockchainState -> Bool
+
+validStateTransition Initializing Active = True
+
+validStateTransition Active Upgrading = True
+
+validStateTransition Upgrading Active = True
+
+validStateTransition Active Maintenance = True
+
+validStateTransition Maintenance Active = True
+
+validStateTransition _ Emergency = True
+
+validStateTransition Emergency Active = True
+
+validStateTransition s1 s2 = s1 == s2
+
+
+{-# INLINABLE validateVotingPeriod #-}
+
+validateVotingPeriod :: (POSIXTime, POSIXTime) -> Bool
+
+validateVotingPeriod (start, end) = start < end && contains (Interval.interval start end) (txInfoValidRange $ scriptContextTxInfo ctx)
+
+
+{-# INLINABLE calculateVotePercentage #-}
+
+calculateVotePercentage :: [(PubKeyHash, Bool)] -> Rational
+
+calculateVotePercentage votes = 
+
+    let positiveVotes = length $ filter snd votes
+
+        totalVotes = length votes
+
+    in if totalVotes == 0 then 0 else toInteger positiveVotes % toInteger totalVotes
+
+
+{-# INLINABLE adminPubKeyHash #-}
+
+adminPubKeyHash :: ScriptContext -> PubKeyHash
+
+adminPubKeyHash = undefined  -- Replace with actual admin public key hash
+
+
+data Blockchain
+
+instance Scripts.ValidatorTypes Blockchain where
+
+    type instance DatumType Blockchain = BlockchainData
+
+    type instance RedeemerType Blockchain = BlockchainAction
+
+
+typedValidator :: Scripts.TypedValidator Blockchain
+
+typedValidator = Scripts.mkTypedValidator @Blockchain
+
+    $$(PlutusTx.compile [|| mkValidator ||])
+
+    $$(PlutusTx.compile [|| wrap ||])
+
+  where
+
+    wrap = Scripts.wrapValidator @BlockchainData @BlockchainAction
+
+
+validator :: Validator
+
+validator = Scripts.validatorScript typedValidator
+
+
+scrAddress :: Ledger.Address
+
+scrAddress = scriptAddress validator
+
+
+-- Enhanced contract endpoints
+
+data BlockchainContractParams = BlockchainContractParams
+
+    { bcpMinAda :: Ada.Ada
+
+    , bcpAdminPKH :: PubKeyHash
+
+    }
+
+
+type AdvancedBlockchainSchema =
+
+    Endpoint "initialize" BlockchainData
+
+    .\/ Endpoint "update" BlockchainData
+
+    .\/ Endpoint "withdraw" Integer
+
+    .\/ Endpoint "proposeGovernance" GovernanceProposal
+
+    .\/ Endpoint "vote" (BuiltinByteString, Bool)
+
+    .\/ Endpoint "executeProposal" BuiltinByteString
+
+    .\/ Endpoint "emergencyShutdown" ()
+
+    .\/ Endpoint "restoreFromEmergency" ()
+
+
+initialize :: AsContractError e => BlockchainContractParams -> BlockchainData -> Contract w s e ()
+
+initialize params bd = do
+
+    let tx = mustPayToTheScript bd $ Ada.toValue (bcpMinAda params)
+
+    ledgerTx <- submitTxConstraints typedValidator tx
+
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+    logInfo @String $ "Initialized blockchain with data: " ++ show bd
+
+
+update :: AsContractError e => BlockchainContractParams -> BlockchainData -> Contract w s e ()
+
+update params newBd = do
+
+    utxos <- utxosAt scrAddress
+
+    case Map.keys utxos of
+
+        []       -> logError @String "No UTxO found at script address"
+
+        oref : _ -> do
+
+            let lookups = Constraints.unspentOutputs utxos <>
+
+                          Constraints.plutusV2OtherScript validator
+
+                redeemerUpdate = Redeemer $ PlutusTx.toBuiltinData $ Update newBd
+
+                tx      = mustSpendScriptOutput oref redeemerUpdate <>
+
+                          mustPayToTheScript newBd (Ada.toValue $ bcpMinAda params)
+
+            ledgerTx <- submitTxConstraintsWith @Blockchain lookups tx
+
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+            logInfo @String $ "Updated blockchain data: " ++ show newBd
+
+
+withdraw :: AsContractError e => BlockchainContractParams -> Integer -> Contract w s e ()
+
+withdraw params amt = do
+
+    utxos <- utxosAt scrAddress
+
+    case Map.keys utxos of
+
+        []       -> logError @String "No UTxO found at script address"
+
+        oref : _ -> do
+
+            let lookups = Constraints.unspentOutputs utxos <>
+
+                          Constraints.plutusV2OtherScript validator
+
+                redeemerWithdraw = Redeemer $ PlutusTx.toBuiltinData $ Withdraw amt
+
+                tx      = mustSpendScriptOutput oref redeemerWithdraw <>
+
+                          mustPayToPubKey (bcpAdminPKH params) (Ada.lovelaceValueOf amt)
+
+            ledgerTx <- submitTxConstraintsWith @Blockchain lookups tx
+
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+
+            logInfo @String $ "Withdrawn " ++ show amt ++ " lovelace"
+
+
+proposeGovernance :: AsContractError e => BlockchainContractParams -> GovernanceProposal -> Contract w s e ()
+
+proposeGovernance params proposal = do
+
+    utxos <- utxosAt scrAddress
+
+    case Map.keys utxos of
+
+        []       -> logError @String "No UTxO found at script address"
+
+        oref
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-# LANGUAGE RecordWildCards #-}
+
+{-# LANGUAGE GADTs #-}
+
+{-# LANGUAGE FlexibleContexts #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import qualified Ledger.Value as Value
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+import qualified Data.Map as Map
+
+import Control.Monad (void)
+
+import Data.Text (Text)
+
+import qualified Plutus.V1.Ledger.Interval as Interval
+
+import qualified Plutus.V1.Ledger.Value as Value
+
+
+-- Advanced data structures
+
+data RDFTriple = RDFTriple 
+
+    { subject :: BuiltinByteString
+
+    , predicate :: BuiltinByteString
+
+    , obj :: BuiltinByteString 
+
+    } deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data PerformanceMetrics = PerformanceMetrics 
+
+    { tps :: Integer
+
+    , latency :: Integer
+
+    , blockSize :: Integer
+
+    , memPoolSize :: Integer
+
+    , networkHashRate :: Integer
+
+    , activeStakePools :: Integer
+
+    , epochLength :: Integer
+
+    , slotLength :: Integer
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data NodeRole = Relay | CoreNode | SPO | LightClient
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''NodeRole
+
+
+data P2PNode = P2PNode 
+
+    { nodeId :: BuiltinByteString
+
+    , reputation :: Integer
+
+    , lastSeen :: POSIXTime
+
+    , role :: NodeRole
+
+    , stake :: Integer
+
+    , version :: BuiltinByteString
+
+    , geolocation :: (Integer, Integer) -- Latitude and Longitude
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainState = Initializing | Active | Upgrading | Maintenance | Emergency | Forking
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainState
+
+
+data VotingMechanism = SimpleQuorum | QuadraticVoting | DelegatedVoting
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''VotingMechanism
+
+
+data GovernanceProposal = GovernanceProposal
+
+    { proposalId :: BuiltinByteString
+
+    , proposer :: PubKeyHash
+
+    , description :: BuiltinByteString
+
+    , votingPeriod :: (POSIXTime, POSIXTime)
+
+    , requiredMajority :: Rational
+
+    , votes :: [(PubKeyHash, Integer)] -- PubKeyHash and voting power
+
+    , votingMechanism :: VotingMechanism
+
+    , proposalType :: ProposalType
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''GovernanceProposal
+
+
+data ProposalType 
+
+    = ParameterChange BuiltinData
+
+    | TreasurySpending Integer PubKeyHash
+
+    | ProtocolUpgrade BuiltinByteString
+
+    | EmergencyAction BuiltinByteString
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''ProposalType
+
+
+data InteroperabilityAction 
+
+    = CrossChainTransfer ChainId Value.Value
+
+    | OracleUpdate BuiltinByteString BuiltinData
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''InteroperabilityAction
+
+
+newtype ChainId = ChainId BuiltinByteString
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''ChainId
+
+
+data BlockchainData = BlockchainData 
+
+    { metrics :: PerformanceMetrics
+
+    , nodes :: [P2PNode]
+
+    , rdfGraph :: RDFGraph
+
+    , state :: BlockchainState
+
+    , version :: BuiltinByteString
+
+    , lastUpdate :: POSIXTime
+
+    , totalStake :: Integer
+
+    , treasuryBalance :: Integer
+
+    , activeProposals :: [GovernanceProposal]
+
+    , protocolParameters :: BuiltinData
+
+    , interoperabilityConfig :: Map ChainId BuiltinData
+
+    , dataFeeds :: Map BuiltinByteString BuiltinData -- For oracle data
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+-- Enhanced validator logic
+
+data BlockchainAction 
+
+    = Update BlockchainData
+
+    | Withdraw Integer PubKeyHash
+
+    | ProposeGovernance GovernanceProposal
+
+    | Vote BuiltinByteString Integer -- proposalId and voting power
+
+    | ExecuteProposal BuiltinByteString
+
+    | EmergencyShutdown
+
+    | RestoreFromEmergency
+
+    | InitiateFork BuiltinByteString -- New chain ID
+
+    | InteropAction InteroperabilityAction
+
+
+PlutusTx.unstableMakeIsData ''BlockchainAction
+
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> BlockchainAction -> ScriptContext -> Bool
+
+mkValidator bd action ctx = case action of
+
+    Update newBd -> validateUpdate bd newBd ctx
+
+    Withdraw amt recipient -> validateWithdraw bd amt recipient ctx
+
+    ProposeGovernance proposal -> validateProposal bd proposal ctx
+
+    Vote proposalId votingPower -> validateVote bd proposalId votingPower ctx
+
+    ExecuteProposal proposalId -> validateExecuteProposal bd proposalId ctx
+
+    EmergencyShutdown -> validateEmergencyShutdown bd ctx
+
+    RestoreFromEmergency -> validateRestoreFromEmergency bd ctx
+
+    InitiateFork newChainId -> validateForkInitiation bd newChainId ctx
+
+    InteropAction action -> validateInteropAction bd action ctx
+
+
+{-# INLINABLE validateUpdate #-}
+
+validateUpdate :: BlockchainData -> BlockchainData -> ScriptContext -> Bool
+
+validateUpdate oldBd newBd ctx =
+
+    traceIfFalse "Insufficient TPS" (tps (metrics newBd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics newBd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes newBd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph newBd) &&
+
+    traceIfFalse "Invalid state transition" (validStateTransition (state oldBd) (state newBd)) &&
+
+    traceIfFalse "Version downgrade not allowed" (version newBd >= version oldBd) &&
+
+    traceIfFalse "Invalid timestamp" (lastUpdate newBd > lastUpdate oldBd) &&
+
+    traceIfFalse "Unauthorized update" (txSignedBy (scriptContextTxInfo ctx) (adminPubKeyHash ctx)) &&
+
+    traceIfFalse "Invalid total stake" (totalStake newBd >= totalStake oldBd) &&
+
+    traceIfFalse "Treasury balance decreased" (treasuryBalance newBd >= treasuryBalance oldBd) &&
+
+    traceIfFalse "Invalid protocol parameters" (validateProtocolParameters (protocolParameters newBd))
+
+
+{-# INLINABLE validateWithdraw #-}
+
+validateWithdraw :: BlockchainData -> Integer -> PubKeyHash -> ScriptContext -> Bool
+
+validateWithdraw bd amt recipient ctx =
+
+    traceIfFalse "Insufficient funds" (Ada.fromValue (valueSpent info) >= Ada.lovelaceOf amt) &&
+
+    traceIfFalse "Unauthorized withdrawal" (txSignedBy info (adminPubKeyHash ctx) || isApprovedTreasurySpending bd recipient amt) &&
+
+    traceIfFalse "Exceeds treasury balance" (amt <= treasuryBalance bd)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateProposal #-}
+
+validateProposal :: BlockchainData -> GovernanceProposal -> ScriptContext -> Bool
+
+validateProposal bd proposal ctx =
+
+    traceIfFalse "Invalid proposer" (txSignedBy info (proposer proposal)) &&
+
+    traceIfFalse "Invalid voting period" (validateVotingPeriod (votingPeriod proposal)) &&
+
+    traceIfFalse "Duplicate proposal" (not $ elem (proposalId proposal) (map proposalId (activeProposals bd))) &&
+
+    traceIfFalse "Invalid proposal type" (validateProposalType bd (proposalType proposal))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateVote #-}
+
+validateVote :: BlockchainData -> BuiltinByteString -> Integer -> ScriptContext -> Bool
+
+validateVote bd proposalId votingPower ctx =
+
+    traceIfFalse "Invalid proposal" (isJust proposal) &&
+
+    traceIfFalse "Voting period ended" (validateVotingPeriod (votingPeriod $ fromJust proposal)) &&
+
+    traceIfFalse "Invalid voting power" (validateVotingPower bd signingPubKeyHash votingPower) &&
+
+    traceIfFalse "Already voted" (not $ any (\(pkh, _) -> pkh == signingPubKeyHash) (votes $ fromJust proposal))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    signingPubKeyHash = case txSignedBy info of
+
+        Nothing -> traceError "No signature"
+
+        Just pkh -> pkh
+
+    proposal = find (\p -> proposalId == proposalId p) (activeProposals bd)
+
+
+{-# INLINABLE validateExecuteProposal #-}
+
+validateExecuteProposal :: BlockchainData -> BuiltinByteString -> ScriptContext -> Bool
+
+validateExecuteProposal bd proposalId ctx =
+
+    traceIfFalse "Invalid proposal" (isJust proposal) &&
+
+    traceIfFalse "Voting period not ended" (not $ validateVotingPeriod (votingPeriod $ fromJust proposal)) &&
+
+    traceIfFalse "Insufficient votes" (calculateVoteResult (fromJust proposal) >= requiredMajority (fromJust proposal)) &&
+
+    traceIfFalse "Unauthorized execution" (txSignedBy info (adminPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    proposal = find (\p -> proposalId == proposalId p) (activeProposals bd)
+
+
+{-# INLINABLE validateEmergencyShutdown #-}
+
+validateEmergencyShutdown :: BlockchainData -> ScriptContext -> Bool
+
+validateEmergencyShutdown bd ctx =
+
+    traceIfFalse "Already in emergency state" (state bd /= Emergency) &&
+
+    traceIfFalse "Unauthorized emergency shutdown" (txSignedBy info (adminPubKeyHash ctx) || isEmergencyApproved bd)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateRestoreFromEmergency #-}
+
+validateRestoreFromEmergency :: BlockchainData -> ScriptContext -> Bool
+
+validateRestoreFromEmergency bd ctx =
+
+    traceIfFalse "Not in emergency state" (state bd == Emergency) &&
+
+    traceIfFalse "Unauthorized restoration" (txSignedBy info (adminPubKeyHash ctx) || isRestoreApproved bd)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateForkInitiation #-}
+
+validateForkInitiation :: BlockchainData -> BuiltinByteString -> ScriptContext -> Bool
+
+validateForkInitiation bd newChainId ctx =
+
+    traceIfFalse "Invalid state for forking" (state bd == Active || state bd == Upgrading) &&
+
+    traceIfFalse "Unauthorized fork initiation" (txSignedBy info (adminPubKeyHash ctx) || isForkApproved bd newChainId) &&
+
+    traceIfFalse "Invalid new chain ID" (validateNewChainId newChainId)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateInteropAction #-}
+
+validateInteropAction :: BlockchainData -> InteroperabilityAction -> ScriptContext -> Bool
+
+validateInteropAction bd action ctx = case action of
+
+    CrossChainTransfer chainId value -> 
+
+        traceIfFalse "Invalid chain ID" (isJust $ Map.lookup chainId (interoperabilityConfig bd)) &&
+
+        traceIfFalse "Insufficient balance" (sufficientBalance value) &&
+
+        traceIfFalse "Unauthorized transfer" (txSignedBy info (adminPubKeyHash ctx))
+
+    OracleUpdate feedId newData ->
+
+        traceIfFalse "Invalid oracle feed" (isJust $ Map.lookup feedId (dataFeeds bd)) &&
+
+        traceIfFalse "Unauthorized update" (txSignedBy info (oraclePubKeyHash ctx feedId))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    sufficientBalance value = Ada.fromValue (valueSpent info) >= Ada.lovelaceOf (Value.valueOf value Ada.adaSymbol Ada.adaToken)
+
+
+{-# INLINABLE validStateTransition #-}
+
+validStateTransition :: BlockchainState -> BlockchainState -> Bool
+
+validStateTransition Initializing Active = True
+
+validStateTransition Active Upgrading = True
+
+validStateTransition Upgrading Active = True
+
+validStateTransition Active Maintenance = True
+
+validStateTransition Maintenance Active = True
+
+validStateTransition _ Emergency = True
+
+validStateTransition Emergency Active = True
+
+validStateTransition Active Forking = True
+
+validStateTransition Forking Active = True
+
+validStateTransition s1 s2 = s1 == s2
+
+
+{-# INLINABLE validateVotingPeriod #-}
+
+validateVotingPeriod :: (POSIXTime, POSIXTime) -> Bool
+
+validateVotingPeriod (start, end) = start < end && contains (Interval.interval start end) (txInfoValidRange $ scriptContextTxInfo ctx)
+
+
+{-# INLINABLE calculateVoteResult #-}
+
+calculateVoteResult :: GovernanceProposal -> Rational
+
+calculateVoteResult proposal = case votingMechanism proposal of
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+{-# LANGUAGE ScopedTypeVariables #-}
+
+{-# LANGUAGE RecordWildCards #-}
+
+{-# LANGUAGE GADTs #-}
+
+{-# LANGUAGE FlexibleContexts #-}
+
+{-# LANGUAGE TypeFamilies #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import qualified Ledger.Value as Value
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+import qualified Data.Map as Map
+
+import Control.Monad (void)
+
+import Data.Text (Text)
+
+import qualified Plutus.V1.Ledger.Interval as Interval
+
+import qualified Plutus.V1.Ledger.Value as Value
+
+import qualified Data.ByteString as BS
+
+
+-- Advanced data structures
+
+data RDFTriple = RDFTriple 
+
+    { subject :: BuiltinByteString
+
+    , predicate :: BuiltinByteString
+
+    , obj :: BuiltinByteString 
+
+    } deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data PerformanceMetrics = PerformanceMetrics 
+
+    { tps :: Integer
+
+    , latency :: Integer
+
+    , blockSize :: Integer
+
+    , memPoolSize :: Integer
+
+    , networkHashRate :: Integer
+
+    , activeStakePools :: Integer
+
+    , epochLength :: Integer
+
+    , slotLength :: Integer
+
+    , totalTransactions :: Integer
+
+    , averageBlockTime :: Integer
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data NodeRole = Relay | CoreNode | SPO | LightClient | ZKProofGenerator
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''NodeRole
+
+
+data P2PNode = P2PNode 
+
+    { nodeId :: BuiltinByteString
+
+    , reputation :: Integer
+
+    , lastSeen :: POSIXTime
+
+    , role :: NodeRole
+
+    , stake :: Integer
+
+    , version :: BuiltinByteString
+
+    , geolocation :: (Integer, Integer) -- Latitude and Longitude
+
+    , uptime :: Rational
+
+    , zkProofCapability :: Bool
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainState = Initializing | Active | Upgrading | Maintenance | Emergency | Forking | Recovering
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainState
+
+
+data VotingMechanism = SimpleQuorum | QuadraticVoting | DelegatedVoting | LiquidDemocracy
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''VotingMechanism
+
+
+data GovernanceProposal = GovernanceProposal
+
+    { proposalId :: BuiltinByteString
+
+    , proposer :: PubKeyHash
+
+    , description :: BuiltinByteString
+
+    , votingPeriod :: (POSIXTime, POSIXTime)
+
+    , requiredMajority :: Rational
+
+    , votes :: [(PubKeyHash, Integer)] -- PubKeyHash and voting power
+
+    , votingMechanism :: VotingMechanism
+
+    , proposalType :: ProposalType
+
+    , stakeDelegations :: Map.Map PubKeyHash PubKeyHash -- Delegator to Delegate
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''GovernanceProposal
+
+
+data ProposalType 
+
+    = ParameterChange BuiltinData
+
+    | TreasurySpending Integer PubKeyHash
+
+    | ProtocolUpgrade BuiltinByteString
+
+    | EmergencyAction BuiltinByteString
+
+    | ConstitutionalChange BuiltinByteString
+
+    | NetworkExpansion [P2PNode]
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''ProposalType
+
+
+data InteroperabilityAction 
+
+    = CrossChainTransfer ChainId Value.Value
+
+    | OracleUpdate BuiltinByteString BuiltinData
+
+    | BridgeOperation BridgeAction
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''InteroperabilityAction
+
+
+data BridgeAction
+
+    = LockAssets ChainId Value.Value
+
+    | ReleaseAssets ChainId Value.Value
+
+    | VerifyProof BuiltinByteString -- ZK Proof
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BridgeAction
+
+
+newtype ChainId = ChainId BuiltinByteString
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''ChainId
+
+
+data ZKProof = ZKProof
+
+    { proofId :: BuiltinByteString
+
+    , verificationKey :: BuiltinByteString
+
+    , proof :: BuiltinByteString
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''ZKProof
+
+
+data AnalyticsData = AnalyticsData
+
+    { dailyActiveUsers :: Integer
+
+    , totalValueLocked :: Integer
+
+    , averageTransactionFee :: Integer
+
+    , stakingParticipationRate :: Rational
+
+    , governanceParticipationRate :: Rational
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''AnalyticsData
+
+
+data BlockchainData = BlockchainData 
+
+    { metrics :: PerformanceMetrics
+
+    , nodes :: [P2PNode]
+
+    , rdfGraph :: RDFGraph
+
+    , state :: BlockchainState
+
+    , version :: BuiltinByteString
+
+    , lastUpdate :: POSIXTime
+
+    , totalStake :: Integer
+
+    , treasuryBalance :: Integer
+
+    , activeProposals :: [GovernanceProposal]
+
+    , protocolParameters :: BuiltinData
+
+    , interoperabilityConfig :: Map ChainId BuiltinData
+
+    , dataFeeds :: Map BuiltinByteString BuiltinData -- For oracle data
+
+    , zkProofs :: [ZKProof]
+
+    , analyticsData :: AnalyticsData
+
+    , constitutionHash :: BuiltinByteString
+
+    } deriving (Show, Generic, FromJSON, ToJSON)
+
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+-- Enhanced validator logic
+
+data BlockchainAction 
+
+    = Update BlockchainData
+
+    | Withdraw Integer PubKeyHash
+
+    | ProposeGovernance GovernanceProposal
+
+    | Vote BuiltinByteString Integer -- proposalId and voting power
+
+    | DelegateVote PubKeyHash -- Delegate to
+
+    | ExecuteProposal BuiltinByteString
+
+    | EmergencyShutdown
+
+    | RestoreFromEmergency
+
+    | InitiateFork BuiltinByteString -- New chain ID
+
+    | InteropAction InteroperabilityAction
+
+    | SubmitZKProof ZKProof
+
+    | UpdateAnalytics AnalyticsData
+
+    | AmendConstitution BuiltinByteString -- New constitution hash
+
+
+PlutusTx.unstableMakeIsData ''BlockchainAction
+
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> BlockchainAction -> ScriptContext -> Bool
+
+mkValidator bd action ctx = case action of
+
+    Update newBd -> validateUpdate bd newBd ctx
+
+    Withdraw amt recipient -> validateWithdraw bd amt recipient ctx
+
+    ProposeGovernance proposal -> validateProposal bd proposal ctx
+
+    Vote proposalId votingPower -> validateVote bd proposalId votingPower ctx
+
+    DelegateVote delegate -> validateDelegateVote bd delegate ctx
+
+    ExecuteProposal proposalId -> validateExecuteProposal bd proposalId ctx
+
+    EmergencyShutdown -> validateEmergencyShutdown bd ctx
+
+    RestoreFromEmergency -> validateRestoreFromEmergency bd ctx
+
+    InitiateFork newChainId -> validateForkInitiation bd newChainId ctx
+
+    InteropAction action -> validateInteropAction bd action ctx
+
+    SubmitZKProof proof -> validateZKProof bd proof ctx
+
+    UpdateAnalytics newAnalytics -> validateAnalyticsUpdate bd newAnalytics ctx
+
+    AmendConstitution newHash -> validateConstitutionAmendment bd newHash ctx
+
+
+{-# INLINABLE validateUpdate #-}
+
+validateUpdate :: BlockchainData -> BlockchainData -> ScriptContext -> Bool
+
+validateUpdate oldBd newBd ctx =
+
+    traceIfFalse "Insufficient TPS" (tps (metrics newBd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics newBd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes newBd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph newBd) &&
+
+    traceIfFalse "Invalid state transition" (validStateTransition (state oldBd) (state newBd)) &&
+
+    traceIfFalse "Version downgrade not allowed" (version newBd >= version oldBd) &&
+
+    traceIfFalse "Invalid timestamp" (lastUpdate newBd > lastUpdate oldBd) &&
+
+    traceIfFalse "Unauthorized update" (txSignedBy (scriptContextTxInfo ctx) (adminPubKeyHash ctx)) &&
+
+    traceIfFalse "Invalid total stake" (totalStake newBd >= totalStake oldBd) &&
+
+    traceIfFalse "Treasury balance decreased" (treasuryBalance newBd >= treasuryBalance oldBd) &&
+
+    traceIfFalse "Invalid protocol parameters" (validateProtocolParameters (protocolParameters newBd)) &&
+
+    traceIfFalse "ZK proofs count decreased" (length (zkProofs newBd) >= length (zkProofs oldBd)) &&
+
+    traceIfFalse "Analytics data invalid" (validateAnalyticsData (analyticsData newBd))
+
+
+-- ... [Previous functions remain largely unchanged]
+
+
+{-# INLINABLE validateDelegateVote #-}
+
+validateDelegateVote :: BlockchainData -> PubKeyHash -> ScriptContext -> Bool
+
+validateDelegateVote bd delegate ctx =
+
+    traceIfFalse "Invalid delegation" (isValidDelegate delegate) &&
+
+    traceIfFalse "Self-delegation not allowed" (signingPubKeyHash /= delegate)
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+    signingPubKeyHash = case txSignedBy info of
+
+        Nothing -> traceError "No signature"
+
+        Just pkh -> pkh
+
+    isValidDelegate = any (\node -> nodeId node == getPubKeyHash delegate) (nodes bd)
+
+
+{-# INLINABLE validateZKProof #-}
+
+validateZKProof :: BlockchainData -> ZKProof -> ScriptContext -> Bool
+
+validateZKProof bd proof ctx =
+
+    traceIfFalse "Invalid proof" (verifyZKProof proof) &&
+
+    traceIfFalse "Duplicate proof" (not $ elem (proofId proof) (map proofId (zkProofs bd))) &&
+
+    traceIfFalse "Unauthorized proof submission" (txSignedBy info (zkProofGeneratorPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateAnalyticsUpdate #-}
+
+validateAnalyticsUpdate :: BlockchainData -> AnalyticsData -> ScriptContext -> Bool
+
+validateAnalyticsUpdate bd newAnalytics ctx =
+
+    traceIfFalse "Invalid daily active users" (dailyActiveUsers newAnalytics >= 0) &&
+
+    traceIfFalse "Invalid total value locked" (totalValueLocked newAnalytics >= totalValueLocked (analyticsData bd)) &&
+
+    traceIfFalse "Invalid average transaction fee" (averageTransactionFee newAnalytics >= 0) &&
+
+    traceIfFalse "Invalid staking participation rate" (stakingParticipationRate newAnalytics >= 0 && stakingParticipationRate newAnalytics <= 1) &&
+
+    traceIfFalse "Invalid governance participation rate" (governanceParticipationRate newAnalytics >= 0 && governanceParticipationRate newAnalytics <= 1) &&
+
+    traceIfFalse "Unauthorized analytics update" (txSignedBy info (analyticsPubKeyHash ctx))
+
+  where
+
+    info = scriptContextTxInfo ctx
+
+
+{-# INLINABLE validateConstitutionAmendment #-}
+
+validateConstitutionAmendment :: BlockchainData -> BuiltinByteString -> ScriptContext -> Bool
+
+validateConstitutionAmendment bd newHash ctx =
+
+    traceIfFalse "Invalid constitution hash" (length newHash == 32) && -- Assuming SHA256 hash
+
+    traceIfFalse "Unauthorized constitution amendment" (isConstitutionChangeApproved bd newHash)
+
+
+{-# INLINABLE calculateVoteResult #-}
+
+calculateVoteResult :: GovernanceProposal -> Rational
+
+calculateVoteResult proposal = case votingMechanism proposal of
+
+    SimpleQuorum -> simpleQuorumResult
+
+    QuadraticVoting -> quadraticVotingResult
+
+    DelegatedVoting -> delegatedVotingResult
+
+    LiquidDemocracy -> liquidDemocracyResult
+
+  where
+
+    simpleQuorumResult = toInteger (length $ filter (\(_, power) -> power > 0) (votes proposal)) % toInteger (length (votes proposal))
+
+    quadraticVotingResult = sum [sqrt (toInteger power) | (_, power) <- votes proposal, power > 0] % sum [sqrt (toInteger (abs power)) | (_, power) <- votes proposal]
+
+    delegatedVotingResult = calculateDelegatedVotes (votes proposal) (stakeDelegations proposal)
+
+    liquidDemocracyResult = calculateLiquidDemocracyVotes (votes proposal) (stakeDelegations proposal)
+
+
+{-# INLINABLE calculateDelegatedVotes #-}
+
+calculateDelegatedVotes :: [(PubKeyHash, Integer)] -> Map.Map PubKeyHash PubKeyHash -> Rational
+
+calculateDelegatedVotes votes delegations = 
+
+    let delegatedVotes = Map.fromListWith (+) [(fromMaybe voter (Map.lookup voter delegations), power) |
+
+
+
+
+
+
+
+
+
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE NoImplicitPrelude #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+
+{-# LANGUAGE TypeApplications #-}
+
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE DeriveGeneric #-}
+
+
+module Cardano.AdvancedBlockchain where
+
+
+import PlutusTx.Prelude
+
+import qualified PlutusTx
+
+import Plutus.V2.Ledger.Api
+
+import Plutus.V2.Ledger.Contexts
+
+import qualified Plutus.V1.Ledger.Value as Value
+
+import Ledger.Typed.Scripts as Scripts
+
+import Plutus.Contract as Contract
+
+import qualified Ledger.Ada as Ada
+
+import Data.Aeson (FromJSON, ToJSON)
+
+import GHC.Generics (Generic)
+
+
+data RDFTriple = RDFTriple { subject :: Text, predicate :: Text, obj :: Text }
+
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+
+PlutusTx.unstableMakeIsData ''RDFTriple
+
+
+type RDFGraph = [RDFTriple]
+
+
+data ChainType = Cardano | OtherChain Text
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+PlutusTx.unstableMakeIsData ''ChainType
+
+
+data PerformanceMetrics = PerformanceMetrics { tps :: Integer, latency :: Integer }
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+PlutusTx.unstableMakeIsData ''PerformanceMetrics
+
+
+data P2PNode = P2PNode { nodeId :: BuiltinByteString, reputation :: Integer }
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+PlutusTx.unstableMakeIsData ''P2PNode
+
+
+data BlockchainData = BlockchainData { chainType :: ChainType, metrics :: PerformanceMetrics, nodes :: [P2PNode], rdfGraph :: RDFGraph }
+
+    deriving (Show, Generic, FromJSON, ToJSON)
+
+PlutusTx.unstableMakeIsData ''BlockchainData
+
+
+{-# INLINABLE mkValidator #-}
+
+mkValidator :: BlockchainData -> () -> ScriptContext -> Bool
+
+mkValidator bd _ ctx =
+
+    traceIfFalse "Invalid chain type" (chainType bd == Cardano) &&
+
+    traceIfFalse "Insufficient TPS" (tps (metrics bd) >= 250) &&
+
+    traceIfFalse "Too high latency" (latency (metrics bd) <= 20) &&
+
+    traceIfFalse "Insufficient nodes" (length (nodes bd) >= 3) &&
+
+    traceIfFalse "Empty RDF graph" (not $ null $ rdfGraph bd)
+
+
+data Blockchain
+
+instance Scripts.ValidatorTypes Blockchain where
+
+    type instance DatumType Blockchain = BlockchainData
+
+    type instance RedeemerType Blockchain = ()
+
+
+typedValidator :: Scripts.TypedValidator Blockchain
+
+typedValidator = Scripts.mkTypedValidator @Blockchain
+
+    $$(PlutusTx.compile [|| mkValidator ||])
+
+
+validator :: Validator
+
+validator = Scripts.validatorScript typedValidator
+
+
+scrAddress :: Ledger.Address
+
+scrAddress = scriptAddress validator
+
+
+type AdvancedBlockchainSchema =
+
+    Endpoint "submit" BlockchainData
+
+
+submit :: AsContractError e => BlockchainData -> Contract w s e ()
+
+submit bd = do
+
+    let tx = mustPayToTheScript bd Ada.adaValueOf 0
+
+    void $ submitTxConstraints typedValidator tx
+
+
+endpoints :: Contract () AdvancedBlockchainSchema Text
+
+endpoints = awaitPromise (submit' `select` otherEndpoint) >> endpoints
+
+  where
+
+    submit' = endpoint @"submit" submit
+
+    otherEndpoint = -- Define other endpoints as needed
+
+
+mkSchemaDefinitions ''AdvancedBlockchainSchema
+
+
+
+
+
+
+#!/bin/bash
+
+# Set up environment variables
+export CARDANO_NODE_SOCKET_PATH="/path/to/node.socket"
+TESTNET_MAGIC=1097911063  # Testnet magic number (change for mainnet)
+
+# Step 1: Compile the Haskell code
+echo "Compiling Haskell code..."
+cabal build
+
+# Step 2: Run the main function to generate the Plutus script
+echo "Generating Plutus script..."
+cabal run cardano-blockchain-contract
+
+# Step 3: Submit the validator script to the blockchain
+echo "Submitting validator script to the blockchain..."
+cardano-cli transaction build \
+    --alonzo-era \
+    --testnet-magic $TESTNET_MAGIC \
+    --tx-in "$(cardano-cli query utxo --testnet-magic $TESTNET_MAGIC --address $(cat payment.addr) --out-file /dev/stdout | sed -n 2p | awk '{print $1"#"$2}')" \
+    --tx-out "$(cat payment.addr)+1744798" \
+    --change-address "$(cat payment.addr)" \
+    --protocol-params-file protocol.json \
+    --out-file tx.raw
+
+cardano-cli transaction sign \
+    --tx-body-file tx.raw \
+    --signing-key-file payment.skey \
+    --testnet-magic $TESTNET_MAGIC \
+    --out-file tx.signed
+
+cardano-cli transaction submit \
+    --testnet-magic $TESTNET_MAGIC \
+    --tx-file tx.signed
+
+# Step 4: Interact with the contract
+echo "Interacting with the contract..."
+cabal run cardano-blockchain-contract-cli -- submit \
+    --cardano-node-socket-path "$CARDANO_NODE_SOCKET_PATH" \
+    --testnet-magic $TESTNET_MAGIC \
+    --chain-type Cardano \
+    --tps 300 \
+    --latency 10 \
+    --nodes "Node1,Node2,Node3,Node4" \
+    --rdf-graph "subject1,predicate1,object1;subject2,predicate2,object2"
+
+echo "Deployment and interaction complete!"
+
+
+module Main where
+
+import Cardano.AdvancedBlockchain
+import Options.Applicative
+import qualified Plutus.V1.Ledger.Api as V1
+import Data.Text (Text, pack)
+
+data Opts = Opts
+  { optCardanoSocket :: FilePath
+  , optTestnetMagic :: Integer
+  , optChainType :: Text
+  , optTps :: Integer
+  , optLatency :: Integer
+  , optNodes :: [Text]
+  , optRdfGraph :: [(Text, Text, Text)]
+  }
+
+parseOpts :: Parser Opts
+parseOpts = Opts
+  <$> strOption (long "cardano-node-socket-path" <> metavar "SOCKET_PATH")
+  <*> option auto (long "testnet-magic" <> metavar "MAGIC")
+  <*> strOption (long "chain-type" <> metavar "CHAIN_TYPE")
+  <*> option auto (long "tps" <> metavar "TPS")
+  <*> option auto (long "latency" <> metavar "LATENCY")
+  <*> option (words <$> str) (long "nodes" <> metavar "NODES")
+  <*> option (parseRdfGraph <$> str) (long "rdf-graph" <> metavar "RDF_GRAPH")
+
+parseRdfGraph :: String -> [(Text, Text, Text)]
+parseRdfGraph = map (toTriple . words . map commaToSpace) . splitOnSemicolon
+  where
+    commaToSpace ',' = ' '
+    commaToSpace c = c
+    splitOnSemicolon = words . map semiToSpace
+    semiToSpace ';' = ' '
+    semiToSpace c = c
+    toTriple [s, p, o] = (pack s, pack p, pack o)
+    toTriple _ = error "Invalid RDF triple format"
+
+main :: IO ()
+main = do
+  opts <- execParser (info (parseOpts <**> helper) fullDesc)
+  let blockchainData = BlockchainData
+        { chainType = if optChainType opts == "Cardano" then Cardano else OtherChain (V1.toBuiltin $ optChainType opts)
+        , metrics = PerformanceMetrics (optTps opts) (optLatency opts)
+        , nodes = map (\n -> P2PNode (V1.toBuiltin n) 100) (optNodes opts)
+        , rdfGraph = map (\(s,p,o) -> RDFTriple (V1.toBuiltin s) (V1.toBuiltin p) (V1.toBuiltin o)) (optRdfGraph opts)
+        }
+  result <- submitBlockchainData blockchainData
+  print result
+
+
+
+
+
+
+{-# LANGUAGE DataKinds #-} {-# LANGUAGE FlexibleContexts #-} {-# LANGUAGE NoImplicitPrelude #-} {-# LANGUAGE OverloadedStrings #-} {-# LANGUAGE ScopedTypeVariables #-} {-# LANGUAGE TemplateHaskell #-} {-# LANGUAGE TypeApplications #-} {-# LANGUAGE TypeFamilies #-} {-# LANGUAGE TypeOperators #-} module UltraAdvancedDAO where import PlutusTx.Prelude import qualified PlutusTx import Ledger hiding (singleton) import Ledger.Constraints as Constraints import qualified Ledger.Scripts as Scripts import Ledger.Ada as Ada import Playground.Contract import qualified Data.Map as Map import Data.Text (Text) import Control.Monad (void) import Data.Aeson (FromJSON, ToJSON) import GHC.Generics (Generic) -- Advanced DAO data structure data DAOParams = DAOParams { daoOwner :: PubKeyHash , daoThreshold :: Integer , daoMembers :: [PubKeyHash] , daoOracle :: PubKeyHash , daoLLMToken :: AssetClass , daoGovernanceToken :: AssetClass , daoTreasuryNFT :: AssetClass , daoStakingPool :: PubKeyHash , daoReputation :: Map.Map PubKeyHash Integer } PlutusTx.makeLift ''DAOParams -- SSI data structure data Identity = Identity { idPubKeyHash :: PubKeyHash , idAttributes :: Map.Map BuiltinByteString BuiltinByteString , idVerifier :: PubKeyHash , idCredentials :: [BuiltinByteString] } PlutusTx.makeLift ''Identity -- Oracle data structure data OracleData = OracleData { oracleValue :: Integer , oracleSignature :: BuiltinByteString , oracleTimestamp :: POSIXTime , oracleConfidence :: Integer } PlutusTx.makeLift ''OracleData -- Proposal data structure data Proposal = Proposal { proposalId :: Integer , proposalDescription :: BuiltinByteString , proposalVotes :: Map.Map PubKeyHash Integer , proposalDeadline :: POSIXTime , proposalType :: ProposalType , proposalStatus :: ProposalStatus } data ProposalType = ParameterChange | FundAllocation | MembershipChange | ContractUpgrade deriving (Show, Eq, Generic) data ProposalStatus = Pending | Active | Executed | Rejected deriving (Show, Eq, Generic) PlutusTx.makeLift ''Proposal PlutusTx.makeLift ''ProposalType PlutusTx.makeLift ''ProposalStatus -- Staking data structure data StakingInfo = StakingInfo { stakerPubKeyHash :: PubKeyHash , stakedAmount :: Integer , stakingStart :: POSIXTime , stakingDuration :: Integer } PlutusTx.makeLift ''StakingInfo -- Define the validator script {-# INLINABLE validateDAO #-} validateDAO :: DAOParams -> Proposal -> ScriptContext -> Bool validateDAO dao proposal ctx = traceIfFalse "Must be signed by DAO member" signedByMember && traceIfFalse "Payment must meet threshold" meetsThreshold && traceIfFalse "Oracle data must be valid" validOracleData && traceIfFalse "Must hold LLM tokens" holdsLLMTokens && traceIfFalse "Must hold governance tokens" holdsGovernanceTokens && traceIfFalse "Proposal must not be expired" proposalNotExpired && traceIfFalse "Treasury NFT must be present" hasTreasuryNFT && traceIfFalse "Staking requirements met" stakingRequirementsMet && traceIfFalse "Reputation threshold met" reputationThresholdMet where info :: TxInfo info = scriptContextTxInfo ctx signedByMember :: Bool signedByMember = any (txSignedBy info) (daoOwner dao : daoMembers dao) meetsThreshold :: Bool meetsThreshold = let value = valueSpent info in Ada.getLovelace (Ada.fromValue value) >= daoThreshold dao validOracleData :: Bool validOracleData = txSignedBy info (daoOracle dao) holdsLLMTokens :: Bool holdsLLMTokens = let value = valueSpent info in assetClassValueOf value (daoLLMToken dao) > 0 holdsGovernanceTokens :: Bool holdsGovernanceTokens = let value = valueSpent info in assetClassValueOf value (daoGovernanceToken dao) > 0 proposalNotExpired :: Bool proposalNotExpired = let currentTime = txInfoValidRange info in from (proposalDeadline proposal) `contains` currentTime hasTreasuryNFT :: Bool hasTreasuryNFT = let value = valueSpent info in assetClassValueOf value (daoTreasuryNFT dao) == 1 stakingRequirementsMet :: Bool stakingRequirementsMet = -- Implement staking validation logic True reputationThresholdMet :: Bool reputationThresholdMet = -- Implement reputation threshold check True -- Compile the validator to Plutus Core daoValidator :: DAOParams -> Scripts.ValidatorScript daoValidator dao = Scripts.validatorScript $ $$(PlutusTx.compile [|| validateDAO ||]) `PlutusTx.applyCode` PlutusTx.liftCode dao -- Define the DAO contract daoContract :: DAOParams -> Contract () DAOSchema Text () daoContract dao = do logInfo @String "Starting Ultra Advanced DAO contract" let val = daoValidator dao logInfo @String $ "DAO validator: " ++ show val void $ submitTx $ mustPayToOtherScript (Scripts.validatorHash val) (Datum $ PlutusTx.toBuiltinData ()) (Ada.lovelaceValueOf $ daoThreshold dao) logInfo @String "DAO initialized" -- Implement BFT consensus bftConsensus -- Implement adaptive behavior adaptiveUpdate -- Start governance process governanceLoop -- Start staking process stakingLoop -- Start reputation management process reputationLoop -- BFT consensus implementation bftConsensus :: Contract () DAOSchema Text () bftConsensus = do logInfo @String "Starting BFT consensus" -- Implement Byzantine Fault Tolerance logic here -- This could involve collecting signatures from a quorum of DAO members logInfo @String "BFT consensus reached" -- Adaptive smart contract behavior adaptiveUpdate :: Contract () DAOSchema Text () adaptiveUpdate = do logInfo @String "Checking for contract updates" -- Implement logic to check for and apply contract updates -- This could involve querying an oracle or checking on-chain data logInfo @String "Contract updated" -- SSI verification verifySSI :: Identity -> Contract () DAOSchema Text Bool verifySSI identity = do logInfo @String "Verifying Self-Sovereign Identity" -- Implement SSI verification logic here -- This could involve checking the identity's attributes and credentials return True -- Tokenized LLM interaction interactWithLLM :: AssetClass -> BuiltinByteString -> Contract () DAOSchema Text BuiltinByteString interactWithLLM llmToken prompt = do logInfo @String "Interacting with tokenized LLM" -- Implement logic to interact with the tokenized LLM -- This could involve sending a transaction with the prompt and receiving a response return "LLM response" -- Governance loop governanceLoop :: Contract () DAOSchema Text () governanceLoop = do logInfo @String "Starting governance loop" proposal <- awaitPromise $ endpoint @"propose" votes <- collectVotes proposal if isProposalAccepted votes then executeProposal proposal else logInfo @String "Proposal rejected" governanceLoop -- Collect votes for a proposal collectVotes :: Proposal -> Contract () DAOSchema Text (Map.Map PubKeyHash Integer) collectVotes proposal = do logInfo @String $ "Collecting votes for proposal " ++ show (proposalId proposal) -- Implement logic to collect and tally votes -- This could involve waiting for a certain time period or until a quorum is reached return Map.empty -- Placeholder -- Check if a proposal is accepted isProposalAccepted :: Map.Map PubKeyHash Integer -> Bool isProposalAccepted votes = let totalVotes = sum $ Map.elems votes threshold = totalVotes `div` 2 in totalVotes > threshold -- Execute an accepted proposal executeProposal :: Proposal -> Contract () DAOSchema Text () executeProposal proposal = do logInfo @String $ "Executing proposal " ++ show (proposalId proposal) case proposalType proposal of ParameterChange -> executeParameterChange proposal FundAllocation -> executeFundAllocation proposal MembershipChange -> executeMembershipChange proposal ContractUpgrade -> executeContractUpgrade proposal -- Staking loop stakingLoop :: Contract () DAOSchema Text () stakingLoop = do logInfo @String "Starting staking loop" stakingInfo <- awaitPromise $ endpoint @"stake" processStaking stakingInfo stakingLoop -- Process staking processStaking :: StakingInfo -> Contract () DAOSchema Text () processStaking stakingInfo = do logInfo @String $ "Processing staking for " ++ show (stakerPubKeyHash stakingInfo) -- Implement staking logic -- This could involve locking tokens, calculating rewards, etc. -- Reputation management loop reputationLoop :: Contract () DAOSchema Text () reputationLoop = do logInfo @String "Starting reputation management loop" reputationUpdate <- awaitPromise $ endpoint @"updateReputation" processReputationUpdate reputationUpdate reputationLoop -- Process reputation update processReputationUpdate :: (PubKeyHash, Integer) -> Contract () DAOSchema Text () processReputationUpdate (member, change) = do logInfo @String $ "Updating reputation for " ++ show member -- Implement reputation update logic -- This could involve adjusting the member's reputation score based on their actions -- Define the schema for the contract type DAOSchema = Endpoint "initialize" DAOParams .\/ Endpoint "propose" Proposal .\/ Endpoint "vote" (Integer, Integer) .\/ Endpoint "executeProposal" Integer .\/ Endpoint "verifyIdentity" Identity .\/ Endpoint "interactLLM" BuiltinByteString .\/ Endpoint "stake" StakingInfo .\/ Endpoint "updateReputation" (PubKeyHash, Integer) -- Define the endpoints endpoints :: Contract () DAOSchema Text () endpoints = do dao <- awaitPromise $ endpoint @"initialize" void $ daoContract dao endpoints -- Main function to run the contract main :: IO () main = runEmulatorTraceIO $ do let owner = pubKeyHash $ walletPubKey $ Wallet 1 member1 = pubKeyHash $ walletPubKey $ Wallet 2 member2 = pubKeyHash $ walletPubKey $ Wallet 3 oracle = pubKeyHash $ walletPubKey $ Wallet 4 stakingPool = pubKeyHash $ walletPubKey $ Wallet 5 threshold = 1000000 -- 1 ADA llmToken = AssetClass (adaSymbol, adaToken) -- Using ADA as a placeholder governanceToken = AssetClass (adaSymbol, adaToken) -- Using ADA as a placeholder treasuryNFT = AssetClass (adaSymbol, adaToken) -- Using ADA as a placeholder initialReputation = Map.fromList [(owner, 100), (member1, 50), (member2, 50)] dao = DAOParams owner threshold [member1, member2] oracle llmToken governanceToken treasuryNFT stakingPool initialReputation void $ activateContractWallet (Wallet 1) endpoints void $ waitNSlots 1 callEndpoint @"initialize" (Wallet 1) dao
+
+
+
+
+
+{-# LANGUAGE OverloadedStrings #-} {-# LANGUAGE RecordWildCards #-} module Blockchain.Setup where import Blockchain.Types import Blockchain.Error import Control.Monad.Except (ExceptT, throwError, liftIO) import qualified Cardano.Api as Api import qualified Cardano.Api.Shelley as Shelley import qualified Cardano.Crypto.Wallet as Crypto import Data.Text (Text) import qualified Data.Text as T import qualified Data.ByteString as BS import Control.Exception (try, SomeException) -- Import your actual HSM provider's API import qualified Crypto.HSM.SecureHSM as HSM -- Import your actual secret management solution import qualified System.SecretManagement.VaultKeeper as Vault -- Configuration type data CardanoConfig = CardanoConfig { nodeSocket :: FilePath , networkId :: Api.NetworkId , blockfrostApiKey :: Text , hsmConfig :: HSM.Config , vaultConfig :: Vault.Config } -- Initialize HSM with proper error handling initializeHSM :: HSM.Config -> ExceptT BlockchainError IO HSM.HSMHandle initializeHSM config = do result <- liftIO $ try $ HSM.initialize config case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "HSM initialization failed: " <> T.pack (show e) Right handle -> do liftIO $ putStrLn "HSM initialized successfully" return handle -- HSM key generation generateKeyPair :: HSM.HSMHandle -> ExceptT BlockchainError IO (Crypto.XPrv, Crypto.XPub) generateKeyPair handle = do result <- liftIO $ try $ HSM.generateEd25519KeyPair handle case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "Key generation failed: " <> T.pack (show e) Right (privKey, pubKey) -> return (Crypto.XPrv privKey, Crypto.XPub pubKey) -- HSM signing operation signWithHSM :: HSM.HSMHandle -> Crypto.XPrv -> BS.ByteString -> ExceptT BlockchainError IO BS.ByteString signWithHSM handle key message = do result <- liftIO $ try $ HSM.signEd25519 handle key message case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "Signing failed: " <> T.pack (show e) Right signature -> return signature -- Initialize Vault for secret management initializeVault :: Vault.Config -> ExceptT BlockchainError IO Vault.VaultClient initializeVault config = do result <- liftIO $ try $ Vault.initializeClient config case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Vault initialization failed: " <> T.pack (show e) Right client -> do liftIO $ putStrLn "Vault initialized successfully" return client -- Store a secret in Vault storeSecret :: Vault.VaultClient -> Text -> Text -> ExceptT BlockchainError IO () storeSecret client key value = do result <- liftIO $ try $ Vault.writeSecret client key value case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Failed to store secret: " <> T.pack (show e) Right _ -> liftIO $ putStrLn $ "Secret stored successfully: " <> T.unpack key -- Retrieve a secret from Vault getSecret :: Vault.VaultClient -> Text -> ExceptT BlockchainError IO Text getSecret client key = do result <- liftIO $ try $ Vault.readSecret client key case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Failed to retrieve secret: " <> T.pack (show e) Right value -> return value -- Main setup function setupBlockchain :: CardanoConfig -> ExceptT BlockchainError IO () setupBlockchain config@CardanoConfig{..} = do hsm <- initializeHSM hsmConfig vault <- initializeVault vaultConfig -- Generate and store a key pair (privKey, pubKey) <- generateKeyPair hsm storeSecret vault "cardano_signing_key" (T.pack $ show privKey) -- Example of using the HSM to sign a message let message = "Hello, Cardano!" signature <- signWithHSM hsm privKey (BS.pack message) liftIO $ putStrLn $ "Signed message: " ++ show signature -- Example of retrieving a secret storedKey <- getSecret vault "cardano_signing_key" liftIO $ putStrLn $ "Retrieved key: " ++ T.unpack storedKey -- Rest of your blockchain setup code... liftIO $ putStrLn "Blockchain setup complete." -- Main function main :: IO () main = do let config = CardanoConfig { nodeSocket = "/path/to/node.socket" , networkId = Api.Mainnet , blockfrostApiKey = "your_blockfrost_api_key" , hsmConfig = HSM.Config { HSM.devicePath = "/dev/hsm" , HSM.password = "hsm_password" } , vaultConfig = Vault.Config { Vault.vaultAddress = "http://localhost:8200" , Vault.vaultToken = "vault_access_token" } } result <- runExceptT $ setupBlockchain config case result of Left err -> putStrLn $ "Setup failed: " ++ show err Right _ -> putStrLn "Blockchain setup completed successfully"
+
+
+{-# LANGUAGE OverloadedStrings #-} module Main where import Cardano.Api import Cardano.Api.Shelley import qualified Cardano.Crypto.Wallet as Crypto import qualified Data.ByteString.Char8 as BS import Control.Exception (try) import System.Environment (getEnv) main :: IO () main = do putStrLn "Starting Cardano deployment..." -- Load configuration config <- loadConfig -- Initialize Cardano node connection nodeSocket <- getEnv "CARDANO_NODE_SOCKET_PATH" networkId <- getEnv "CARDANO_NETWORK" let connectionInfo = LocalNodeConnectInfo { localNodeNetworkId = if networkId == "mainnet" then Mainnet else Testnet, localNodeSocketPath = nodeSocket } -- Deploy smart contracts deployResult <- try $ deploySmartContracts connectionInfo config case deployResult of Left err -> putStrLn $ "Deployment failed: " ++ show (err :: SomeException) Right _ -> putStrLn "Smart contracts deployed successfully" putStrLn "Cardano deployment completed." loadConfig :: IO Config loadConfig = -- Implement configuration loading deploySmartContracts :: LocalNodeConnectInfo -> Config -> IO () deploySmartContracts connInfo config = do -- Implement smart contract deployment logic -- This would involve creating transactions, signing them, and submitting to the network putStrLn "Deploying smart contracts..."
+
+{-# LANGUAGE OverloadedStrings #-} {-# LANGUAGE RecordWildCards #-} module Blockchain.Setup where import Blockchain.Types import Blockchain.Error import Control.Monad.Except (ExceptT, throwError, liftIO) import qualified Cardano.Api as Api import qualified Cardano.Api.Shelley as Shelley import qualified Cardano.Crypto.Wallet as Crypto import Data.Text (Text) import qualified Data.Text as T import qualified Data.ByteString as BS import Network.HTTP.Simple import Data.Aeson (Value, decode, encode) import Control.Exception (try, SomeException) import Control.Retry (retrying, exponentialBackoff, limitRetries) import System.Log.FastLogger import qualified System.Metrics as Metrics import qualified System.Metrics.Prometheus.Metric.Gauge as Gauge import qualified System.Metrics.Prometheus.Http.Scrape as Prometheus -- Actual HSM provider (using Thales payShield as an example) import qualified Security.Cryptography.Thales.PayShield as HSM -- Actual secret management solution (using HashiCorp Vault as an example) import qualified System.HashiCorp.Vault as Vault -- Configuration type data CardanoConfig = CardanoConfig { nodeSocket :: FilePath , networkId :: Api.NetworkId , blockfrostApiKey :: Text , hsmConfig :: HSM.Config , vaultConfig :: Vault.Config , loggingConfig :: LoggingConfig , monitoringConfig :: MonitoringConfig } -- Initialize HSM with proper error handling initializeHSM :: HSM.Config -> ExceptT BlockchainError IO HSM.PayShield initializeHSM config = do result <- liftIO $ try $ HSM.connect (HSM.host config) (HSM.port config) case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "HSM initialization failed: " <> T.pack (show e) Right hsm -> do liftIO $ logInfo "HSM initialized successfully" return hsm -- HSM key generation generateKeyPair :: HSM.PayShield -> ExceptT BlockchainError IO (Crypto.XPrv, Crypto.XPub) generateKeyPair hsm = do result <- liftIO $ try $ HSM.generateKeyPair hsm HSM.ECCurveSecp256k1 case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "Key generation failed: " <> T.pack (show e) Right (privKey, pubKey) -> return (Crypto.XPrv privKey, Crypto.XPub pubKey) -- HSM signing operation signWithHSM :: HSM.PayShield -> Crypto.XPrv -> BS.ByteString -> ExceptT BlockchainError IO BS.ByteString signWithHSM hsm key message = do result <- liftIO $ try $ HSM.sign hsm key message HSM.SHA256 case result of Left (e :: SomeException) -> throwError $ KeyManagementError $ "Signing failed: " <> T.pack (show e) Right signature -> return signature -- Initialize Vault for secret management initializeVault :: Vault.Config -> ExceptT BlockchainError IO Vault.Client initializeVault config = do result <- liftIO $ try $ Vault.new config case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Vault initialization failed: " <> T.pack (show e) Right client -> do liftIO $ logInfo "Vault initialized successfully" return client -- Store a secret in Vault storeSecret :: Vault.Client -> Text -> Text -> ExceptT BlockchainError IO () storeSecret client key value = do result <- liftIO $ try $ Vault.write client ("secret/" <> key) (Vault.object ["value" .= value]) case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Failed to store secret: " <> T.pack (show e) Right _ -> liftIO $ logInfo $ "Secret stored successfully: " <> key -- Retrieve a secret from Vault getSecret :: Vault.Client -> Text -> ExceptT BlockchainError IO Text getSecret client key = do result <- liftIO $ try $ Vault.read client ("secret/" <> key) case result of Left (e :: SomeException) -> throwError $ SecretManagementError $ "Failed to retrieve secret: " <> T.pack (show e) Right secret -> return $ secret ^. Vault.secretData . at "value" . non "" -- Deploy smart contracts with actual serialized scripts deploySmartContracts :: CardanoConfig -> HSM.PayShield -> Vault.Client -> LoggerSet -> Gauge.Gauge -> ExceptT BlockchainError IO () deploySmartContracts config hsm vault logger metrics = do liftIO $ pushLogStrLn logger "Deploying smart contracts..." tokenSaleScript <- getSecret vault "token_sale_script" governanceScript <- getSecret vault "governance_script" tokenSaleAddress <- deployContract config hsm "Token Sale" tokenSaleScript governanceAddress <- deployContract config hsm "Governance" governanceScript liftIO $ do pushLogStrLn logger $ "Token sale contract deployed at: " ++ show tokenSaleAddress pushLogStrLn logger $ "Governance contract deployed at: " ++ show governanceAddress Gauge.set metrics 100 -- Assuming 100 means fully deployed -- Helper function to deploy a contract deployContract :: CardanoConfig -> HSM.PayShield -> Text -> Text -> ExceptT BlockchainError IO Shelley.Address deployContract CardanoConfig{..} hsm contractName script = do let plutusScript = Shelley.PlutusScriptSerialised $ BS.pack $ T.unpack script signedTx <- signWithHSM hsm (Shelley.makeSignedTransaction [] plutusScript) result <- liftIO $ try $ Shelley.submitTransaction nodeSocket networkId signedTx case result of Left (e :: SomeException) -> throwError $ TransactionError $ contractName <> " contract deployment failed: " <> T.pack (show e) Right txId -> do let scriptAddress = Shelley.scriptAddress plutusScript liftIO $ logInfo $ T.unpack contractName <> " contract deployed in transaction: " ++ show txId return scriptAddress -- Main function main :: IO () main = do config <- loadConfig "config.yaml" result <- runExceptT $ do hsm <- initializeHSM (hsmConfig config) vault <- initializeVault (vaultConfig config) logger <- setupLogging (loggingConfig config) metrics <- setupMonitoring (monitoringConfig config) deploySmartContracts config hsm vault logger metrics case result of Left err -> logError $ "Setup failed: " ++ show err Right _ -> logInfo "Blockchain setup completed successfully" -- Logging helpers logInfo :: String -> IO () logInfo msg = withFastLogger $ \logger -> logger $ "INFO: " ++ msg logError :: String -> IO () logError msg = withFastLogger $ \logger -> logger $ "ERROR: " ++ msg withFastLogger :: (LoggerSet -> IO ()) -> IO () withFastLogger action = do logger <- newFileLoggerSet defaultBufSize "cardano-app.log" action logger rmLoggerSet logger
+
+
+
+
+
+
+environment:
+
+Shell
+
+$ python -m venv ~/.my-env $ source ~/.my-env/bin/activate 
+
+Using the above commands, you first create the virtual environment, then you activate it. Now it’s time to install the IPython console using pip. Since you’ll also need NumPy and Matplotlib, it’s a good idea install them too:
+
+Shell
+
+(my-env) $ python -m pip install ipython numpy matplotlib (my-env) $ ipython 
+
+Now you’re ready to start coding. This is the code for computing the dot product of input_vector and weights_1:
+
+Python
+
+In [1]: input_vector = [1.72, 1.23] In [2]: weights_1 = [1.26, 0] In [3]: weights_2 = [2.17, 0.32] In [4]: # Computing the dot product of input_vector and weights_1 In [5]: first_indexes_mult = input_vector[0] * weights_1[0] In [6]: second_indexes_mult = input_vector[1] * weights_1[1] In [7]: dot_product_1 = first_indexes_mult + second_indexes_mult In [8]: print(f"The dot product is: {dot_product_1}") Out[8]: The dot product is: 2.1672 
+
+The result of the dot product is 2.1672. Now that you know how to compute the dot product, it’s time to use np.dot() from NumPy. Here’s how to compute dot_product_1 using np.dot():
+
+Python
+
+In [9]: import numpy as np In [10]: dot_product_1 = np.dot(input_vector, weights_1) In [11]: print(f"The dot product is: {dot_product_1}") Out[11]: The dot product is: 2.1672 
+
+np.dot() does the same thing you did before, but now you just need to specify the two arrays as arguments. Now let’s compute the dot product of input_vector and weights_2:
+
+Python
+
+In [10]: dot_product_2 = np.dot(input_vector, weights_2) In [11]: print(f"The dot product is: {dot_product_2}") Out[11]: The dot product is: 4.1259
+
+
+In [12]: # Wrapping the vectors in NumPy arrays
+In [13]: input_vector = np.array([1.66, 1.56])
+In [14]: weights_1 = np.array([1.45, -0.66])
+In [15]: bias = np.array([0.0])
+
+In [16]: def sigmoid(x):
+   ...:     return 1 / (1 + np.exp(-x))
+
+In [17]: def make_prediction(input_vector, weights, bias):
+   ...:      layer_1 = np.dot(input_vector, weights) + bias
+   ...:      layer_2 = sigmoid(layer_1)
+   ...:      return layer_2
+
+In [18]: prediction = make_prediction(input_vector, weights_1, bias)
+
+In [19]: print(f"The prediction result is: {prediction}")
+Out[19]: The prediction result is: [0.7985731]
+
+
+
+# Changing the value of input_vector
+input_vector = np.array([2, 1.5])
+
+prediction = make_prediction(input_vector, weights_1, bias)
+
+print(f"The prediction result is: {prediction}")
+
+
+
+In [24]: target = 0
+
+In [25]: mse = np.square(prediction - target)
+
+In [26]: print(f"Prediction: {prediction}; Error: {mse}")
+Out[26]: Prediction: [0.87101915]; Error: [0.7586743596667225]
+
+
+
+In [27]: derivative = 2 * (prediction - target)
+
+In [28]: print(f"The derivative is {derivative}")
+Out[28]: The derivative is: [1.7420383]
+
+
+
+In [29]: # Updating the weights
+In [30]: weights_1 = weights_1 - derivative
+
+In [31]: prediction = make_prediction(input_vector, weights_1, bias)
+
+In [32]: error = (prediction - target) ** 2
+
+In [33]: print(f"Prediction: {prediction}; Error: {error}")
+Out[33]: Prediction: [0.01496248]; Error: [0.00022388]
+
+
+derror_dweights = (
+    derror_dprediction * dprediction_dlayer1 * dlayer1_dweights
+)
+
+
+def sigmoid_deriv(x):
+    return sigmoid(x) * (1-sigmoid(x))
+
+derror_dprediction = 2 * (prediction - target)
+layer_1 = np.dot(input_vector, weights_1) + bias
+dprediction_dlayer1 = sigmoid_deriv(layer_1)
+dlayer1_dbias = 1
+
+derror_dbias = (
+    derror_dprediction * dprediction_dlayer1 * dlayer1_dbias
+)
+
+
+class NeuralNetwork:
+    def __init__(self, learning_rate):
+        self.weights = np.array([np.random.randn(), np.random.randn()])
+        self.bias = np.random.randn()
+        self.learning_rate = learning_rate
+
+    def _sigmoid(self, x):
+        return 1 / (1 + np.exp(-x))
+
+    def _sigmoid_deriv(self, x):
+        return self._sigmoid(x) * (1 - self._sigmoid(x))
+
+    def predict(self, input_vector):
+        layer_1 = np.dot(input_vector, self.weights) + self.bias
+        layer_2 = self._sigmoid(layer_1)
+        prediction = layer_2
+        return prediction
+
+    def _compute_gradients(self, input_vector, target):
+        layer_1 = np.dot(input_vector, self.weights) + self.bias
+        layer_2 = self._sigmoid(layer_1)
+        prediction = layer_2
+
+        derror_dprediction = 2 * (prediction - target)
+        dprediction_dlayer1 = self._sigmoid_deriv(layer_1)
+        dlayer1_dbias = 1
+        dlayer1_dweights = (0 * self.weights) + (1 * input_vector)
+
+        derror_dbias = (
+            derror_dprediction * dprediction_dlayer1 * dlayer1_dbias
+        )
+        derror_dweights = (
+            derror_dprediction * dprediction_dlayer1 * dlayer1_dweights
+        )
+
+        return derror_dbias, derror_dweights
+
+    def _update_parameters(self, derror_dbias, derror_dweights):
+        self.bias = self.bias - (derror_dbias * self.learning_rate)
+        self.weights = self.weights - (
+            derror_dweights * self.learning_rate
+        )
+
+
+learning_rate = 0.1
+
+neural_network = NeuralNetwork(learning_rate)
+
+neural_network.predict(input_vector)
+
+
+class NeuralNetwork:
+    # ...
+
+    def train(self, input_vectors, targets, iterations):
+        cumulative_errors = []
+        for current_iteration in range(iterations):
+            # Pick a data instance at random
+            random_data_index = np.random.randint(len(input_vectors))
+
+            input_vector = input_vectors[random_data_index]
+            target = targets[random_data_index]
+
+            # Compute the gradients and update the weights
+            derror_dbias, derror_dweights = self._compute_gradients(
+                input_vector, target
+            )
+
+            self._update_parameters(derror_dbias, derror_dweights)
+
+            # Measure the cumulative error for all the instances
+            if current_iteration % 100 == 0:
+                cumulative_error = 0
+                # Loop through all the instances to measure the error
+                for data_instance_index in range(len(input_vectors)):
+                    data_point = input_vectors[data_instance_index]
+                    target = targets[data_instance_index]
+
+                    prediction = self.predict(data_point)
+                    error = np.square(prediction - target)
+
+                    cumulative_error = cumulative_error + error
+                cumulative_errors.append(cumulative_error)
+
+        return cumulative_errors
+
+
+# Paste the NeuralNetwork class code here
+# (and don't forget to add the train method to the class)
+
+import matplotlib.pyplot as plt
+
+input_vectors = np.array(
+    [
+        [3, 1.5],
+        [2, 1],
+        [4, 1.5],
+        [3, 4],
+        [3.5, 0.5],
+        [2, 0.5],
+        [5.5, 1],
+        [1, 1],
+    ]
+)
+
+targets = np.array([0, 1, 0, 1, 0, 1, 1, 0])
+
+learning_rate = 0.1
+
+neural_network = NeuralNetwork(learning_rate)
+
+training_error = neural_network.train(input_vectors, targets, 10000)
+
+plt.plot(training_error)
+plt.xlabel("Iterations")
+plt.ylabel("Error for all training instances")
+plt.savefig("cumulative_error.png")
+
+
+lr = 1 #learning rate
+bias = 1 #value of bias
+weights = [random.random(),random.random(),random.random()] #weights generated in a list (3 weights in total for 2 neurons and the bias)
+
+The beginning of the program just defines libraries and the values of the parameters, and creates a list which contains the values of the weights that will be modified (those are generated randomly).
+
+def Perceptron(input1, input2, output) :
+outputP = input1*weights[0]+input2*weights[1]+bias*weights[2]
+if outputP > 0 : #activation function (here Heaviside)
+outputP = 1
+else :
+outputP = 0
+error = output – outputP
+weights[0] += error * input1 * lr
+weights[1] += error * input2 * lr
+weights[2] += error * bias * lr
+
+Here we create a function which defines the work of the output neuron. It takes 3 parameters (the 2 values of the neurons and the expected output). “outputP” is the variable corresponding to the output given by the Perceptron. Then we calculate the error, used to modify the weights of every connections to the output neuron right after.
+
+for i in range(50) :
+Perceptron(1,1,1) #True or true
+Perceptron(1,0,1) #True or false
+Perceptron(0,1,1) #False or true
+Perceptron(0,0,0) #False or false
+
+
+
+x = int(input())
+y = int(input())
+outputP = x*weights[0] + y*weights[1] + bias*weights[2]
+if outputP > 0 : #activation function
+outputP = 1
+else :
+outputP = 0
+print(x, "or", y, "is : ", outputP)
+
+
+
+outputP = 1/(1+numpy.exp(-outputP)) #sigmoid function
+
+
+let sum = 0; for (let i = 0; i < inputs.length; i++) { sum += inputs[i] * weights[i]; } 
+
+Steps 1 and 2: Add up all the weighted inputs.
+
+With the sum, I can then compute the output:
+
+let output = activate(sum); 
+
+Step 3: Pass the sum through an activation function.
+
+function activate(sum) { 
+
+The activation function
+
+if (sum > 0) { return 1; } else { return -1; } 
+
+Return a 1 if positive, –1 if negative.
+
+}
+
+
+
+class Perceptron { 
+
+constructor() { 
+
+this.weights = []; 
+
+} 
+
+The constructor can receive an argument indicating the number of inputs (in this case, three: �0x0​, �1x1​, and a bias) and size the weights array accordingly, filling it with random values to start:
+
+constructor(n) { this.weights = []; for (let i = 0; i < n; i++) { 
+
+The argument n determines the number of inputs (including the bias).
+
+this.weights[i] = random(-1, 1); 
+
+The weights are picked randomly to start.
+
+} 
+
+}
+
+
+
+feedForward(inputs) { 
+
+let sum = 0; 
+
+for (let i = 0; i < this.weights.length; i++) { 
+
+sum += inputs[i] * this.weights[i]; 
+
+} 
+
+return this.activate(sum); 
+
+The result is the sign of the sum, –1 or +1. Here the perceptron is making a guess: Is it on one side of the line or the other?
+
+} 
+
+} 
+
+Presumably, I could now create a Perceptron 
+
+
+
+
+let perceptron = new Perceptron(3); 
+
+Create the perceptron.
+
+let inputs = [50, -12, 1]; 
+
+The input is three values: x, y, and the bias.
+
+let guess = perceptron.feedForward(inputs); 
+
+The answer!
+
+
+
+
+train(inputs, desired) { 
+
+Step 1: Provide the inputs and known answer. These are passed in as arguments to train().
+
+let guess = this.feedforward(inputs); 
+
+Step 2: Guess according to those inputs.
+
+let error = desired - guess; 
+
+Step 3: Compute the error (the difference between desired and guess).
+
+for (let i = 0; i < this.weights.length; i++) { this.weights[i] = this.weights[i] + error * inputs[i] * this.learningConstant; } 
+
+Step 4: Adjust all the weights according to the error and learning constant.
+
+} 
+
+Here’s the Perceptron class as a whole:
+
+class Perceptron { 
+
+constructor(totalInputs) { 
+
+this.weights = []; this.learningConstant = 0.01; 
+
+The perceptron stores its weights and learning constants.
+
+for (let i = 0; i < totalInputs; i++) { this.weights[i] = random(-1, 1); } 
+
+The weights start off random.
+
+} 
+
+feedforward(inputs) { let sum = 0; for (let i = 0; i < this.weights.length; i++) { sum += inputs[i] * this.weights[i]; } return this.activate(sum); } 
+
+Return an output based on inputs.
+
+activate(sum) { if (sum > 0) { return 1; } else { return -1; } } 
+
+The output is a +1 or –1.
+
+train(inputs, desired) { let guess = this.feedforward(inputs); let error = desired - guess; for (let i = 0; i < this.weights.length; i++) { 
+
+Train the network against known data.
+
+this.weights[i] = this.weights[i] + error * inputs[i] * this.learningConstant; } } 
+
+}
+
+
+
+function f(x) { return 0.5 * x - 1; } 
+
+A function to calculate y based on x along a line
+
+Now there’s the matter of the p5.js canvas defaulting to (0, 0) in the top-left corner with the y-axis pointing down. For this discussion, I’ll assume I’ve built the following into the code to reorient the canvas to match a more traditional Cartesian space.
+
+translate(width / 2, height / 2); 
+
+Move the origin (0, 0) to the center.
+
+scale(1, -1); 
+
+Flip the y-axis orientation (positive points up!).
+
+I can now pick a random point in the 2D space:
+
+let x = random(-100, 100); 
+
+let y = random(-100, 100); 
+
+How do I know if this point is above or below the line? The line function f(x) returns the y value on the line for that x-position. I’ll call that �lineyline​:
+
+let yline = f(x); 
+
+The y position on the line
+
+
+
+let desired = -1; if (y > yline) { 
+
+Start with a value of –1.
+
+desired = 1; 
+
+The answer becomes +1 if y is above the line.
+
+} 
+
+I can then make an input array to go with the desired output:
+
+let trainingInputs = [x, y, 1]; 
+
+Don’t forget to include the bias!
+
+Assuming that I have a perceptron variable, I can train it by providing the inputs along with the desired answer:
+
+perceptron.train(trainingInputs, desired);
+
+
+
+
+let perceptron; 
+
+The perceptron
+
+let training = []; 
+
+An array for training data
+
+let count = 0; 
+
+A counter to track training data points one by one
+
+function f(x) { return 0.5 * x + 1; } 
+
+The formula for a line
+
+function setup() { 
+
+createCanvas(640, 240); 
+
+perceptron = new Perceptron(3, 0.0001); 
+
+The perceptron has three inputs (including bias) and a learning rate of 0.0001.
+
+for (let i = 0; i < 2000; i++) { 
+
+Make 2,000 training data points.
+
+let x = random(-width / 2, width / 2); 
+
+let y = random(-height / 2, height / 2); 
+
+training[i] = [x, y, 1]; 
+
+} 
+
+} 
+
+function draw() { 
+
+background(255); 
+
+translate(width / 2, height / 2); scale(1, -1); 
+
+Reorient the canvas to match a traditional Cartesian plane.
+
+stroke(0); strokeWeight(2); line(-width / 2, f(-width / 2), width / 2, f(width / 2)); 
+
+Draw the line.
+
+let x = training[count][0]; let y = training[count][1]; 
+
+Get the current (x, y) of the training data.
+
+let desired = -1; if (y > f(x)) { desired = 1; } 
+
+What is the desired output?
+
+perceptron.train(training[count], desired); 
+
+Train the perceptron.
+
+count = (count + 1) % training.length; 
+
+For animation, train one point at a time.
+
+for (let dataPoint of training) { let guess = perceptron.feedforward(dataPoint); if (guess > 0) { fill(127); } else { fill(255); } strokeWeight(1); stroke(0); circle(dataPoint[0], dataPoint[1], 8); } 
+
+Draw all the points and color according 
+
+
+
+
+let options = { 
+
+inputs: 4, 
+
+outputs: ["iris-setosa", "iris-virginica", "iris-versicolor"], 
+
+task: "classification", 
+
+}; 
+
+let digitClassifier = ml5.neuralNetwork(options); 
+
+The electricity regression scenario had three input values (occupants, size, temperature) and one output value (usage in kWh). With regression, there are no string output labels, so only an integer indicating the number of outputs is required:
+
+let options = { 
+
+inputs: 3, 
+
+outputs: 1, 
+
+task: "regression", 
+
+}; 
+
+let energyPredictor = ml5.n
+
+
+
+let data = [ 
+
+{ x: 0.99, y: 0.02, label: "right" }, 
+
+{ x: 0.76, y: -0.1, label: "right" }, 
+
+{ x: -1.0, y: 0.12, label: "left" }, 
+
+{ x: -0.9, y: -0.1, label: "left" }, 
+
+{ x: 0.02, y: 0.98, label: "down" }, 
+
+{ x: -0.2, y: 0.75, label: "down" }, 
+
+{ x: 0.01, y: -0.9, label: "up" }, 
+
+{ x: -0.1, y: -0.8, label: "up" }, 
+
+];
+
+
+
+let options = { 
+
+task: "classification", 
+
+inputs: 2, 
+
+outputs: ["up", "down", "left", "right"], 
+
+debug: true 
+
+}; 
+
+let classifier = ml5.neuralNetwork(options);
+
+
+
+for (let item of data) { 
+
+let inputs = [item.x, item.y]; 
+
+An array of two numbers for the inputs
+
+let outputs = [item.label]; 
+
+A single string label for the output
+
+classifier.addData(inputs, outputs); 
+
+Add the training data to the classifier.
+
+}
+
+
+
+classifier.normalizeData(); 
+
+Normalize the data.
+
+
+classifier.train(finishedTraining); 
+
+The train() method initiates the training process.
+
+function finishedTraining() { console.log("Training complete!"); } 
+
+A callback function for when the training is complete
+
+
+
+let options = { epochs: 25 }; 
+
+Set the number of epochs for training.
+
+classifier.train(options, finishedTraining);
+
+
+
+
+let direction = createVector(1, 0); 
+
+Manually create a vector.
+
+let inputs = [direction.x, direction.y]; 
+
+Convert the x- and y-components into an input array.
+
+classifier.classify(inputs, gotResults); 
+
+Ask the model to classify the inputs.
+
+
+
+function gotResults(results) { 
+
+console.log(results); 
+
+}
+
+
+
+[ 
+
+{ 
+
+"label": "right", 
+
+"confidence": 0.9669702649116516 
+
+}, 
+
+{ 
+
+"label": "up", 
+
+"confidence": 0.01878807507455349 
+
+}, 
+
+{ 
+
+"label": "down", 
+
+"confidence": 0.013948931358754635 
+
+}, 
+
+{ 
+
+"label": "left", 
+
+"confidence": 0.00029277068097144365 
+
+} 
+
+]
+
+
+
+let status = "training"; 
+
+When the sketch starts, it will show a status of training.
+
+function draw() { 
+
+background(255); 
+
+textAlign(CENTER, CENTER); 
+
+textSize(64); 
+
+text(status, width / 2, height / 2); 
+
+} 
+
+function finishedTraining() { status = "ready"; } 
+
+This is the callback for when training is complete, and the message changes to 
+
+
+
+function mousePressed() { start = createVector(mouseX, mouseY); } 
+
+Store the start of a gesture when the mouse is pressed.
+
+function mouseDragged() { end = createVector(mouseX, mouseY); } 
+
+Update the end of a gesture as the mouse is dragged.
+
+function mouseReleased() { 
+
+The gesture is complete when the mouse is released.
+
+let dir = p5.Vector.sub(end, start); dir.normalize(); 
+
+Calculate and normalize a direction vector.
+
+let inputs = [dir.x, dir.y]; classifier.classify(inputs, gotResults); 
+
+Convert to an input array and classify.
+
+} 
+
+function gotResults(error, results) { status = results[0].label; } 
+
+Store the resulting label in the status 
+
+
+
+
+
+
+
+
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE OverloadedStrings #-}
+
+import PlutusTx
+import PlutusTx.Prelude
+import qualified Plutus.V1.Ledger.Api as Ledger
+import qualified Plutus.V1.Ledger.Contexts as Contexts
+import qualified Plutus.V1.Ledger.Scripts as Scripts
+import qualified Plutus.V1.Ledger.Value as Value
+import qualified Plutus.V1.Ledger.Interval as Interval
+import qualified Plutus.V1.Ledger.Crypto as Crypto
+import qualified Plutus.V1.Ledger.Tx as Tx
+import qualified Plutus.V1.Ledger.TxId as TxId
+import qualified Plutus.V1.Ledger.Address as Address
+
+data NeuralNetwork = NeuralNetwork
+    { weights :: [Double]
+    , bias :: Double
+    , learningRate :: Double
+    }
+
+sigmoid :: Double -> Double
+sigmoid x = 1 / (1 + exp (-x))
+
+sigmoidDeriv :: Double -> Double
+sigmoidDeriv x = sigmoid x * (1 - sigmoid x)
+
+makePrediction :: NeuralNetwork -> [Double] -> Double
+makePrediction nn inputVector =
+    let layer1 = sum (zipWith (*) (weights nn) inputVector) + bias nn
+    in sigmoid layer1
+
+updateWeights :: NeuralNetwork -> [Double] -> Double -> NeuralNetwork
+updateWeights nn inputVector target =
+    let prediction = makePrediction nn inputVector
+        error = prediction - target
+        derivative = 2 * error
+        newWeights = zipWith (\w d -> w - d) (weights nn) (repeat derivative)
+    in nn { weights = newWeights }
+
+-- Example usage
+exampleUsage :: NeuralNetwork
+exampleUsage = let nn = NeuralNetwork [0.5, -0.5] 0.0 0.01
+                   inputVector = [1.0, 2.0]
+                   target = 0.0
+                   updatedNN = updateWeights nn inputVector target
+               in updatedNN
+
+
+
+
+
+
+
+You're right to point out these issues. I'll provide an improved version of the code that addresses these concerns and makes it more ready for deployment on the Cardano environment. Keep in mind that some aspects, like a full user interface, would typically be separate components. I'll focus on improving the core functionality and addressing the main issues you've highlighted.
+
+```haskell
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+
+module Main where
+
+import qualified Cardano.Api as Api
+import qualified Cardano.Api.Shelley as Shelley
+import qualified Plutus.V1.Ledger.Api as Plutus
+import qualified Plutus.V1.Ledger.Contexts as Contexts
+import qualified Plutus.V1.Ledger.Scripts as Scripts
+import qualified Ledger.Typed.Scripts as Scripts
+import qualified PlutusTx
+import PlutusTx.Prelude hiding (Semigroup(..), unless)
+import qualified PlutusTx.Builtins as Builtins
+import qualified Plutus.V1.Ledger.Value as Value
+import Data.Text (Text)
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+import System.Environment (getArgs)
+import Control.Monad (when, forM_)
+import Control.Exception (catch, SomeException, try)
+import Data.Aeson (encode, decode, FromJSON, ToJSON)
+import qualified Data.ByteString.Lazy as BSL
+import System.Directory (doesFileExist, createDirectoryIfMissing)
+import System.FilePath ((</>))
+import System.Exit (exitFailure)
+import Data.Maybe (fromMaybe)
+import Control.Concurrent (threadDelay)
+import System.IO (hFlush, stdout)
+import qualified Data.Map.Strict as Map
+import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Format (formatTime, defaultTimeLocale)
+import System.Log.Logger
+import System.Log.Handler.Syslog
+import System.Log.Handler.Simple
+import System.Log.Handler (setFormatter)
+import System.Log.Formatter
+import qualified Cardano.Crypto.Wallet as Crypto
+import qualified Cardano.Wallet.Primitive.Types.Address as Wallet
+import qualified Cardano.Wallet.Primitive.Types.Coin as Wallet
+import qualified Cardano.Wallet.Primitive.Types.TokenPolicy as TokenPolicy
+
+-- Improved Neural Network Implementation
+data NeuralNetwork = NeuralNetwork
+    { weights :: [[Integer]]
+    , biases :: [Integer]
+    , learningRate :: Integer
+    } deriving (Show, FromJSON, ToJSON)
+
+PlutusTx.makeLift ''NeuralNetwork
+
+-- Improved activation function (ReLU)
+{-# INLINABLE relu #-}
+relu :: Integer -> Integer
+relu x = max 0 x
+
+-- Improved forward pass
+{-# INLINABLE forwardPass #-}
+forwardPass :: NeuralNetwork -> [Integer] -> [Integer]
+forwardPass NeuralNetwork{..} inputs =
+    foldl' layerForward inputs weights
+  where
+    layerForward :: [Integer] -> [Integer] -> [Integer]
+    layerForward layerInputs layerWeights =
+        zipWith (+) (map relu $ zipWith dotProduct (repeat layerInputs) layerWeights) biases
+    
+    dotProduct :: [Integer] -> [Integer] -> Integer
+    dotProduct xs ys = sum $ zipWith (*) xs ys
+
+-- Improved backpropagation
+{-# INLINABLE backpropagate #-}
+backpropagate :: NeuralNetwork -> [Integer] -> [Integer] -> NeuralNetwork
+backpropagate nn@NeuralNetwork{..} inputs targets =
+    let outputs = forwardPass nn inputs
+        deltas = zipWith (-) outputs targets
+        newWeights = updateWeights weights deltas inputs
+        newBiases = updateBiases biases deltas
+    in nn { weights = newWeights, biases = newBiases }
+  where
+    updateWeights :: [[Integer]] -> [Integer] -> [Integer] -> [[Integer]]
+    updateWeights ws ds ins = 
+        zipWith (\w d -> zipWith (\x i -> x - (d * i * learningRate `divide` 1000000)) w ins) ws ds
+    
+    updateBiases :: [Integer] -> [Integer] -> [Integer]
+    updateBiases bs ds = 
+        zipWith (\b d -> b - (d * learningRate `divide` 1000000)) bs ds
+
+-- NFT Minting Policy
+{-# INLINABLE mkNFTPolicy #-}
+mkNFTPolicy :: Plutus.TxOutRef -> Plutus.TokenName -> () -> Plutus.ScriptContext -> Bool
+mkNFTPolicy oref tn () ctx =
+    traceIfFalse "UTxO not consumed" hasUTxO &&
+    traceIfFalse "Invalid mint amount" checkMintedAmount
+  where
+    info :: Plutus.TxInfo
+    info = Plutus.scriptContextTxInfo ctx
+
+    hasUTxO :: Bool
+    hasUTxO = any (\i -> Plutus.txInInfoOutRef i == oref) $ Plutus.txInfoInputs info
+
+    checkMintedAmount :: Bool
+    checkMintedAmount = case Value.flattenValue (Plutus.txInfoMint info) of
+        [(_, tn', amt)] -> tn' == tn && amt == 1
+        _               -> False
+
+nftPolicy :: Plutus.TxOutRef -> Plutus.TokenName -> Scripts.MintingPolicy
+nftPolicy oref tn = Plutus.MintingPolicy $ 
+    Scripts.mkMintingPolicyScript $
+        $$(PlutusTx.compile [|| \oref' tn' -> Scripts.wrapMintingPolicy $ mkNFTPolicy oref' tn' ||])
+        `PlutusTx.applyCode`
+        PlutusTx.liftCode oref
+        `PlutusTx.applyCode`
+        PlutusTx.liftCode tn
+
+-- Validator script
+data NNDatum = NNDatum
+    { nnState :: NeuralNetwork
+    , owner :: Plutus.PubKeyHash
+    } deriving Show
+
+PlutusTx.unstableMakeIsData ''NNDatum
+
+data NNRedeemer = Train [Integer] [Integer] | Predict [Integer]
+    deriving Show
+
+PlutusTx.unstableMakeIsData ''NNRedeemer
+
+{-# INLINABLE mkValidator #-}
+mkValidator :: NNDatum -> NNRedeemer -> Plutus.ScriptContext -> Bool
+mkValidator datum redeemer ctx =
+    traceIfFalse "Not signed by owner" signedByOwner &&
+    case redeemer of
+        Train inputs targets ->
+            traceIfFalse "Invalid input size" (length inputs == length (head $ weights $ nnState datum)) &&
+            traceIfFalse "Invalid target size" (length targets == length (last $ weights $ nnState datum))
+        Predict inputs ->
+            traceIfFalse "Invalid input size" (length inputs == length (head $ weights $ nnState datum))
+  where
+    signedByOwner :: Bool
+    signedByOwner = Contexts.txSignedBy (Plutus.scriptContextTxInfo ctx) (owner datum)
+
+-- Typed validator
+data NNTyped
+instance Scripts.ValidatorTypes NNTyped where
+    type DatumType NNTyped = NNDatum
+    type RedeemerType NNTyped = NNRedeemer
+
+typedValidator :: Scripts.TypedValidator NNTyped
+typedValidator = Scripts.mkTypedValidator @NNTyped
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @NNDatum @NNRedeemer
+
+-- Configuration type
+data Config = Config
+    { networkId :: Api.NetworkId
+    , socketPath :: FilePath
+    , nnParams :: NeuralNetwork
+    , walletSeed :: Text  -- Seed phrase for key derivation
+    , logLevel :: Priority
+    , maxRetries :: Int
+    , retryDelay :: Int  -- in microseconds
+    }
+    deriving (Show, FromJSON, ToJSON)
+
+-- Transaction result type
+data TxResult = TxResult
+    { txId :: Api.TxId
+    , timestamp :: UTCTime
+    , status :: TxStatus
+    }
+    deriving (Show, FromJSON, ToJSON)
+
+data TxStatus = Submitted | Confirmed | Failed String
+    deriving (Show, FromJSON, ToJSON)
+
+-- Key management
+deriveKeys :: Text -> (Crypto.XPrv, Wallet.Address)
+deriveKeys seed = 
+    let rootKey = Crypto.generateKeyFromSeed (encodeUtf8 seed) 32
+        acctKey = Crypto.deriveAccountPrivateKey rootKey 0
+        addrKey = Crypto.deriveAddressPrivateKey acctKey 0 0
+        pubKey  = Crypto.toXPub addrKey
+        addr    = Wallet.mkAddress pubKey
+    in (addrKey, addr)
+
+-- Initialize Cardano connection with the latest protocol parameters
+initializeCardanoConnection :: Config -> IO (Api.LocalNodeConnectInfo, Api.ProtocolParameters)
+initializeCardanoConnection Config{..} = do
+    infoM "Main" "Initializing Cardano connection..."
+    let connectInfo = Api.LocalNodeConnectInfo
+            { Api.localNodeNetworkId = networkId
+            , Api.localNodeSocketPath = socketPath
+            }
+    protocolParams <- Api.queryNodeLocalState connectInfo Api.QueryCurrentProtocolParameters
+    return (connectInfo, protocolParams)
+
+-- Build and submit a transaction with retry logic and fee calculation
+buildAndSubmitTxWithRetry :: Config -> Api.LocalNodeConnectInfo -> Api.ProtocolParameters -> Api.TxBodyContent Api.AlonzoEra -> IO (Either String TxResult)
+buildAndSubmitTxWithRetry Config{..} connectInfo protocolParams txBodyContent = do
+    let retry attempt = do
+            when (attempt > 0) $ do
+                infoM "Main" $ "Retrying transaction submission (attempt " ++ show attempt ++ ")"
+                threadDelay retryDelay
+            
+            result <- try $ buildAndSubmitTx connectInfo protocolParams txBodyContent
+            case result of
+                Left (e :: SomeException) -> do
+                    warningM "Main" $ "Transaction submission failed: " ++ show e
+                    if attempt < maxRetries
+                        then retry (attempt + 1)
+                        else return $ Left $ "Max retries reached. Last error: " ++ show e
+                Right txResult -> return $ Right txResult
+
+    retry 0
+
+-- Build and submit a transaction with fee calculation
+buildAndSubmitTx :: Api.LocalNodeConnectInfo -> Api.ProtocolParameters -> Api.TxBodyContent Api.AlonzoEra -> IO TxResult
+buildAndSubmitTx connectInfo protocolParams txBodyContent = do
+    infoM "Main" "Building and submitting transaction..."
+    result <- Api.runExceptT $ do
+        txBody <- Api.createAndValidateTransactionBody protocolParams txBodyContent
+        let fee = Api.evaluateTransactionFee protocolParams txBody
+        txBodyWithFee <- Api.createAndValidateTransactionBody protocolParams (txBodyContent { Api.txFee = Api.Lovelace fee })
+        Api.signTransaction txBodyWithFee
+    case result of
+        Left err -> do
+            errorM "Main" $ "Transaction creation failed: " ++ show err
+            return $ TxResult (Api.TxId "") <$> getCurrentTime <*> pure (Failed $ show err)
+        Right signedTx -> do
+            res <- Api.submitTxToNodeLocal connectInfo signedTx
+            timestamp <- getCurrentTime
+            case res of
+                Right txId -> do
+                    infoM "Main" $ "Transaction submitted successfully. TxId: " ++ show txId
+                    return $ TxResult txId timestamp Submitted
+                Left err -> do
+                    errorM "Main" $ "Transaction submission failed: " ++ show err
+                    return $ TxResult (Api.TxId "") timestamp (Failed $ show err)
+
+-- Initialize the Neural Network contract
+initializeContract :: Config -> IO ()
+initializeContract config@Config{..} = do
+    infoM "Main" "Initializing Neural Network contract..."
+    (connectInfo, protocolParams) <- initializeCardanoConnection config
+    let (privKey, address) = deriveKeys walletSeed
+    utxo <- Api.queryNodeLocalState connectInfo $ Api.QueryUTxO (Api.QueryUTxOByAddress [Api.AddressShelley address])
+    let requiredAmount = 10000000 -- 10 ADA
+        inputs = selectUtxos utxo requiredAmount
+        
+        nftPolicyScript = nftPolicy (head inputs) "NeuralNetworkNFT"
+        nftAssetClass = Api.AssetClass (Api.PolicyId $ Scripts.monetaryPolicyHash nftPolicyScript, "NeuralNetworkNFT")
+        
+        txBodyContent = Api.TxBodyContent
+            { Api.txIns = map (\txIn -> (txIn, Api.BuildTxWith $ Api.KeyWitness Api.KeyWitnessForSpending)) inputs
+            , Api.txInsCollateral = Api.TxInsCollateral Api.CollateralInBabbageEra []
+            , Api.txOuts = [Api.TxOut (Api.AddressShelley $ Scripts.validatorAddress typedValidator) (Api.lovelaceToValue requiredAmount <> Api.valueFromList [(nftAssetClass, 1)]) (Api.TxOutDatumInline $ Api.toCardanoData $ NNDatum nnParams (Plutus.PubKeyHash $ Api.serialiseToRawBytes $ Crypto.toXPub privKey)) Api.ReferenceScriptNone]
+            , Api.txFee = Api.Lovelace 0  -- Will be calculated later
+            , Api.txValidityRange = Api.TxValidityNoLowerBound
+            , Api.txMetadata = Api.TxMetadataNone
+            , Api.txAuxScripts = []
+            , Api.txExtraKeyWits = []
+            , Api.txProtocolParams = Just protocolParams
+            , Api.txWithdrawals = Api.TxWithdrawalsNone
+            , Api.txCertificates = Api.TxCertificatesNone
+            , Api.txUpdateProposal = Api.TxUpdateProposalNone
+            , Api.txMintValue = Api.TxMintValue Api.MintValueInBabbageEra (Api.valueFromList [(nftAssetClass, 1)]) (Api.BuildTxWith [nftPolicyScript])
+            , Api.txScriptValidity = Api.TxScriptValidityNone
+            }
+    
+    result <- buildAndSubmitTxWithRetry config connectInfo protocolParams txBodyContent
+    case result of
+        Right txResult -> do
+            infoM "Main" $ "Contract initialized. TxId: " ++ show (txId txResult)
+            saveTxResult "initialize" txResult
+        Left err -> errorM "Main" $ "Error: " ++ err
+
+-- Main function
+main :: IO ()
+main = do
+    args <- getArgs
+    config <- loadConfig "config.json"
+    setupLogging (logLevel config)
+    
+    case args of
+        ["init"] -> initializeContract config
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+/**
+ * THIS IS AN EXAMPLE CONTRACT THAT USES UN-AUDITED CODE.
+ * DO NOT USE THIS CODE IN PRODUCTION.
+ */
+
+contract HelloWorld {
+    string public message;
+
+    constructor(string memory initialMessage) {
+        message = initialMessage;
+    }
+
+    function updateMessage(string memory newMessage) public {
+        message = newMessage;
+    }
+}
+
+
+pragma solidity >=0.7.0 <0.9.0;
+
+
+contract HelloWorld {
+
+}
+
+string public message;
+uint256 internal internalVar;
+uint8 private privateVar;
+
+
+constructor(string memory initialMessage) {
+  message = initialMessage;
+}
+
+
+constructor(string memory initialMessage) {
+  message = initialMessage;
+}
+
+function updateMessage(string memory newMessage) public {
+  message = newMessage;
+}
+
+npm install dev3-sdk
+
+import { Chainlink } from "dev3-sdk"
+
+const ethSDK = Chainlink.instance("https://ethereum.publicnode.com", Chainlink.PriceFeeds.ETH)
+
+
+constructor(string memory initialMessage) {
+  message = initialMessage;
+}
+
+function updateMessage(string memory newMessage) public {
+  message = newMessage;
+}
+constructor(string memory initialMessage) {
+  message = 
+
+
+// SPDX-License-Identifier: MIT
+
+pragma solidity 0.8.7;
+
+/**
+ * THIS IS AN EXAMPLE CONTRACT THAT USES UN-AUDITED CODE.
+ * DO NOT USE THIS CODE IN PRODUCTION.
+ */
+
+interface numberComparison {
+    function isSameNum(uint a, uint b) external view returns (bool);
+}
+
+contract Test is numberComparison {
+    constructor() {}
+
+    function isSameNum(uint a, uint b) external pure override returns (bool) {
+        if (a == b) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+}
+
+
+// AAVE/ETH price feed
+ethSDK.getFromOracle(ethSDK.feeds.AAVE_ETH).then((res) => {
+    console.log(res.answer.toString());
+});
+// AAVE/ETH price feed
+ethSDK.getFromOracle(ethSDK.feeds.AAVE_ETH).then((res) => {
+    console.log(res.answer.toString());
+});
+
+node index.js
+
+export interface RoundDataModel {
+  roundID: BigNumber
+  answer: BigNumber
+  formattedAnswer?: string
+  startedAt: BigNumber
+  updatedAt: BigNumber
+  answeredInRound: BigNumber
+  assetName?: string
+  dataFeedName?: string
+}
+
+6pragma solidity ^0.8.0;
+
+import "@chainlink/contracts/src/v0.8/ChainlinkClient.sol";
+
+contract TemperatureContract is ChainlinkClient {
+
+uint256 public temperature;
+
+constructor() public {
+setPublicChainlinkToken();
+}
+
+function getTemperature(string memory _city) public {
+Chainlink.Request memory request = buildChainlinkRequest(
+"c0f6d82985c74a9ba84e9c6345b5d5d5",
+address(this),
+this.fulfillTemperature.selector
+);
+string memory url = string(abi.encodePacked("https://api.openweathermap.org/data/2.5/weather?q=", _city, "&appid=YOUR_APP_ID"));
+request.add("get", url);
+request.add("path", "main.temp");
+sendChainlinkRequestTo(0x01BE23585060835E02B77ef475b0Cc51aA1e0709, request, 0.1 ether);
+}
+
+function fulfillTemperature(bytes32 _requestId, uint256 _temperature) public recordChainlinkFulfillment(_requestId) {
+temperature = _temperature;
+}
+
+}
+TemperatureContract contract = new TemperatureContract();
+contract.getTemperature("New York");
+
+
+
+
+
+{-# LANGUAGE DataKinds #-} {-# LANGUAGE DeriveAnyClass #-} {-# LANGUAGE DeriveGeneric #-} {-# LANGUAGE FlexibleContexts #-} {-# LANGUAGE MultiParamTypeClasses #-} {-# LANGUAGE NoImplicitPrelude #-} {-# LANGUAGE OverloadedStrings #-} {-# LANGUAGE ScopedTypeVariables #-} {-# LANGUAGE TemplateHaskell #-} {-# LANGUAGE TypeApplications #-} {-# LANGUAGE TypeFamilies #-} {-# LANGUAGE TypeOperators #-} module FuturisticHelloWorld where import Control.Monad hiding (fmap) import Data.Aeson (FromJSON, ToJSON, Value) import Data.Text (Text) import qualified Data.Map as Map import GHC.Generics (Generic) import Plutus.Contract as Contract import Plutus.Trace.Emulator as Emulator import qualified PlutusTx import PlutusTx.Prelude hiding (Semigroup(..), unless) import Ledger hiding (singleton) import Ledger.Constraints as Constraints import qualified Ledger.Typed.Scripts as Scripts import Ledger.Ada as Ada import Ledger.Value as Value import Ledger.Time (POSIXTime) import Playground.Contract (printJson, printSchemas, ensureKnownCurrencies, stage, ToSchema) import Playground.TH (mkKnownCurrencies, mkSchemaDefinitions) import Playground.Types (KnownCurrency (..)) import Prelude (IO, Semigroup (..), Show (..), String) import Text.Printf (printf) import qualified Plutus.V2.Ledger.Api as V2 import qualified Plutus.V2.Ledger.Contexts as Contexts import Plutus.V1.Ledger.Crypto (PubKeyHash) import Plutus.V1.Ledger.Bytes (LedgerBytes(LedgerBytes)) import Cardano.Crypto.Hash.Class (hashToBytes) import Cardano.Crypto.Hash.Blake2b (Blake2b_256) import qualified Cardano.Ledger.Alonzo.TxBody as Alonzo import qualified Cardano.Ledger.Babbage as Babbage import qualified Cardano.Ledger.Core as Core import qualified Cardano.Ledger.Crypto as Crypto -- Define the data for our contract data HelloWorldDatum = HelloWorldDatum { message :: BuiltinString , updateCount :: Integer , authorizedUsers :: [PubKeyHash] , lastUpdateTime :: POSIXTime , oracleValue :: Integer , merkleRoot :: LedgerBytes , stateHash :: LedgerBytes , governanceTokens :: Map.Map PubKeyHash Integer , proposalHistory :: [LedgerBytes] } deriving Show PlutusTx.unstableMakeIsData ''HelloWorldDatum -- Define the parameters for our contract data HelloWorldParams = HelloWorldParams { newMessage :: BuiltinString , newAuthorizedUser :: Maybe PubKeyHash , oracleUpdate :: Maybe Integer , metadata :: Maybe Value , merkleProof :: [LedgerBytes] , stateTransition :: LedgerBytes , governanceProposal :: Maybe GovernanceProposal } deriving (Generic, ToJSON, FromJSON, ToSchema) PlutusTx.unstableMakeIsData ''HelloWorldParams -- Governance proposal structure data GovernanceProposal = GovernanceProposal { proposalId :: Integer , proposalDescription :: BuiltinString , proposalAction :: ProposalAction , votes :: Map.Map PubKeyHash Bool } deriving (Generic, ToJSON, FromJSON, ToSchema) PlutusTx.unstableMakeIsData ''GovernanceProposal -- Possible governance actions data ProposalAction = ChangeParameter BuiltinString Integer | AddAuthorizedUser PubKeyHash | RemoveAuthorizedUser PubKeyHash | UpgradeContract LedgerBytes deriving (Generic, ToJSON, FromJSON, ToSchema) PlutusTx.unstableMakeIsData ''ProposalAction -- Define our own tokens data HelloToken instance Scripts.ValidatorTypes HelloToken where type instance DatumType HelloToken = HelloWorldDatum type instance RedeemerType HelloToken = HelloWorldParams -- Merkle tree verification {-# INLINABLE verifyMerkleProof #-} verifyMerkleProof :: LedgerBytes -> [LedgerBytes] -> LedgerBytes -> Bool verifyMerkleProof leaf [] root = leaf == root verifyMerkleProof leaf (x:xs) root = verifyMerkleProof (hashPair leaf x) xs root where hashPair a b = LedgerBytes $ hashToBytes $ hashWith Blake2b_256 $ a <> b -- State transition verification {-# INLINABLE verifyStateTransition #-} verifyStateTransition :: HelloWorldDatum -> HelloWorldParams -> LedgerBytes -> Bool verifyStateTransition oldDatum params transition = hashState newState == transition where newState = updateDatum oldDatum params hashState = LedgerBytes . hashToBytes . hashWith Blake2b_256 . PlutusTx.toBuiltinData -- Update datum based on parameters and governance decisions {-# INLINABLE updateDatum #-} updateDatum :: HelloWorldDatum -> HelloWorldParams -> HelloWorldDatum updateDatum oldDatum params = HelloWorldDatum { message = newMessage params , updateCount = updateCount oldDatum + 1 , authorizedUsers = updateAuthorizedUsers oldDatum params , lastUpdateTime = lastUpdateTime oldDatum , oracleValue = maybe (oracleValue oldDatum) id (oracleUpdate params) , merkleRoot = merkleRoot oldDatum , stateHash = stateTransition params , governanceTokens = updateGovernanceTokens oldDatum params , proposalHistory = updateProposalHistory oldDatum params } -- Update authorized users based on governance decisions {-# INLINABLE updateAuthorizedUsers #-} updateAuthorizedUsers :: HelloWorldDatum -> HelloWorldParams -> [PubKeyHash] updateAuthorizedUsers oldDatum params = case governanceProposal params of Just (GovernanceProposal _ _ (AddAuthorizedUser newUser) votes) -> if countVotes votes > (length (authorizedUsers oldDatum) `divide` 2) then newUser : authorizedUsers oldDatum else authorizedUsers oldDatum Just (GovernanceProposal _ _ (RemoveAuthorizedUser userToRemove) votes) -> if countVotes votes > (length (authorizedUsers oldDatum) `divide` 2) then filter (/= userToRemove) (authorizedUsers oldDatum) else authorizedUsers oldDatum _ -> case newAuthorizedUser params of Just newUser -> newUser : authorizedUsers oldDatum Nothing -> authorizedUsers oldDatum -- Update governance tokens based on participation {-# INLINABLE updateGovernanceTokens #-} updateGovernanceTokens :: HelloWorldDatum -> HelloWorldParams -> Map.Map PubKeyHash Integer updateGovernanceTokens oldDatum params = case governanceProposal params of Just (GovernanceProposal _ _ _ votes) -> foldr (\voter tokens -> Map.insertWith (+) voter 1 tokens) (governanceTokens oldDatum) (Map.keys votes) _ -> governanceTokens oldDatum -- Update proposal history {-# INLINABLE updateProposalHistory #-} updateProposalHistory :: HelloWorldDatum -> HelloWorldParams -> [LedgerBytes] updateProposalHistory oldDatum params = case governanceProposal params of Just proposal -> LedgerBytes (hashToBytes $ hashWith Blake2b_256 $ PlutusTx.toBuiltinData proposal) : proposalHistory oldDatum Nothing -> proposalHistory oldDatum -- Count votes for a proposal {-# INLINABLE countVotes #-} countVotes :: Map.Map PubKeyHash Bool -> Integer countVotes = Map.foldl (\acc vote -> if vote then acc + 1 else acc) 0 -- Define the validator script {-# INLINABLE mkValidator #-} mkValidator :: HelloWorldDatum -> HelloWorldParams -> V2.ScriptContext -> Bool mkValidator datum params ctx = traceIfFalse "Message cannot be empty" (not $ emptyString $ newMessage params) && traceIfFalse "Update count must increase" (updateCount datum' > updateCount datum) && traceIfFalse "Unauthorized update" (txSignedBy info (head $ authorizedUsers datum)) && traceIfFalse "Update too soon" (V2.from (lastUpdateTime datum + 3600000) `V2.contains` V2.txInfoValidRange info) && traceIfFalse "Invalid Merkle proof" (verifyMerkleProof (newMessage params) (merkleProof params) (merkleRoot datum)) && traceIfFalse "Invalid state transition" (verifyStateTransition datum params (stateTransition params)) && traceIfFalse "Invalid governance action" (verifyGovernanceAction datum params) && case newAuthorizedUser params of Nothing -> True Just newUser -> traceIfFalse "New user already authorized" (not $ elem newUser $ authorizedUsers datum) && traceIfFalse "Too many authorized users" (length (authorizedUsers datum) < 10) where info = V2.scriptContextTxInfo ctx datum' = updateDatum datum params emptyString :: BuiltinString -> Bool emptyString s = s == "" -- Verify governance actions {-# INLINABLE verifyGovernanceAction #-} verifyGovernanceAction :: HelloWorldDatum -> HelloWorldParams -> Bool verifyGovernanceAction datum params = case governanceProposal params of Nothing -> True Just proposal -> traceIfFalse "Invalid proposal" (verifyProposal datum proposal) && traceIfFalse "Insufficient votes" (countVotes (votes proposal) > (length (authorizedUsers datum) `divide` 2)) -- Verify individual proposals {-# INLINABLE verifyProposal #-} verifyProposal :: HelloWorldDatum -> GovernanceProposal -> Bool verifyProposal datum proposal = case proposalAction proposal of ChangeParameter _ _ -> True AddAuthorizedUser _ -> True RemoveAuthorizedUser userToRemove -> elem userToRemove (authorizedUsers datum) UpgradeContract _ -> True -- Boilerplate to compile the validator typedValidator :: Scripts.TypedValidator HelloToken typedValidator = Scripts.mkTypedValidator @HelloToken $$(PlutusTx.compile [|| mkValidator ||]) $$(PlutusTx.compile [|| wrap ||]) where wrap = Scripts.wrapValidator @HelloWorldDatum @HelloWorldParams -- Define the minting policy {-# INLINABLE mkPolicy #-} mkPolicy :: PubKeyHash -> () -> V2.ScriptContext -> Bool mkPolicy pkh () ctx = V2.txSignedBy (V2.scriptContextTxInfo ctx) pkh && Contexts.valueSpent (V2.scriptContextTxInfo ctx) `Value.geq` Ada.lovelaceValueOf 10_000_000 policy :: PubKeyHash -> Scripts.MintingPolicy policy pkh = V2.mkMintingPolicyScript $ $$(PlutusTx.compile [|| Scripts.wrapMintingPolicy . mkPolicy ||]) `PlutusTx.applyCode` PlutusTx.liftCode pkh -- Define the contract endpoints initContract :: AsContractError e => Contract w s e () initContract = do pkh <- ownPubKeyHash now <- currentTime logInfo @String "Initializing Futuristic Hello World contract" let datum = HelloWorldDatum { message = "Hello, Future Cardano!" , updateCount = 0 , authorizedUsers = [pkh] , lastUpdateTime = now , oracleValue = 0 , merkleRoot = LedgerBytes $ hashToBytes $ hashWith Blake2b_256 "Initial Merkle Root" , stateHash = LedgerBytes $ hashToBytes $ hashWith Blake2b_256 "Initial State" , governanceTokens = Map.singleton pkh 1 , proposalHistory = [] } val = Ada.lovelaceValueOf 10_000_000 <> Value.singleton (V2.scriptCurrencySymbol $ policy pkh) "HelloToken" 1 void $ submitTxConstraints typedValidator $ Constraints.mustPayToTheScript datum val logInfo @String "Contract initialized with HelloToken minted" updateMessage :: AsContractError e => HelloWorldParams -> Contract w s e () updateMessage params = do pkh <- ownPubKeyHash now <- currentTime logInfo @String "Updating message or governance" utxos <- utxosAt $ V2.scriptAddress typedValidator case Map.toList utxos of [] -> throwError "No UTXOs found" (oref, o):_ -> do let lookups = Constraints.unspentOutputs (Map.singleton oref o) <> Constraints.otherScript (V2.validatorScript typedValidator) <> Constraints.mintingPolicy (policy pkh) oldDatum = getDatum o newDatum = updateDatum oldDatum params redeemer = params val = Ada.lovelaceValueOf 10_000_000 <> Value.singleton (V2.scriptCurrencySymbol $ policy pkh) "HelloToken" 1 tx = Constraints.mustSpendScriptOutput oref redeemer <> Constraints.mustPayToTheScript newDatum val <> Constraints.mustMintValue (Value.singleton (V2.scriptCurrencySymbol $ policy pkh) "HelloToken" 1) <> Constraints.mustBeSignedBy pkh <> Constraints.mustValidateIn (V2.from $ now + 3600000) case metadata params of Nothing -> pure () Just md -> void $ submitTxMetadata md ledgerTx <- submitTxConstraintsWith @HelloToken lookups tx void $ awaitTxConfirmed $ getCardanoTxId ledgerTx logInfo @String $ "Contract updated: " ++ show (newMessage params) where getDatum :: V2.ChainIndexTxOut -> HelloWorldDatum getDatum o = case V2._ciTxOutDatum o of Left _ -> traceError "datum hash not found" Right (V2.
+
+
+
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoValidator where
+
+import           PlutusTx.Prelude
+import qualified PlutusTx
+import           Ledger               hiding (singleton)
+import qualified Ledger.Typed.Scripts as Scripts
+import           Ledger.Ada           as Ada
+
+-- Define the data for our validator
+data MyCustomDatum = MyCustomDatum
+    { beneficiary :: PubKeyHash
+    , deadline    :: POSIXTime
+    }
+PlutusTx.unstableMakeIsData ''MyCustomDatum
+
+-- Define our validator
+{-# INLINABLE validateSpend #-}
+validateSpend :: MyCustomDatum -> () -> ScriptContext -> Bool
+validateSpend datum () ctx =
+    traceIfFalse "beneficiary's signature missing" signedByBeneficiary &&
+    traceIfFalse "deadline not reached" deadlineReached
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    signedByBeneficiary :: Bool
+    signedByBeneficiary = txSignedBy info $ beneficiary datum
+
+    deadlineReached :: Bool
+    deadlineReached = contains (from $ deadline datum) $ txInfoValidRange info
+
+-- Boilerplate to compile the validator
+validator :: Scripts.TypedValidator MyCustomDatum
+validator = Scripts.mkTypedValidator @MyCustomDatum
+    $$(PlutusTx.compile [|| validateSpend ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @MyCustomDatum @() @ScriptContext
+
+-- Compile the validator to its on-chain representation
+validatorScript :: Script
+validatorScript = Scripts.validatorScript validator
+
+-- Get the hash of the validator script
+validatorHash :: Ledger.ValidatorHash
+validatorHash = Scripts.validatorHash validator
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoValidator where
+
+import           Control.Monad          hiding (fmap)
+import           Data.Aeson             (ToJSON, FromJSON)
+import           Data.Text              (Text)
+import           GHC.Generics           (Generic)
+import           Plutus.Contract        as Contract
+import           Plutus.Trace.Emulator  as Emulator
+import qualified PlutusTx
+import           PlutusTx.Prelude       hiding (Semigroup(..), unless)
+import           Ledger                 hiding (mint, singleton)
+import           Ledger.Constraints     as Constraints
+import qualified Ledger.Typed.Scripts   as Scripts
+import           Ledger.Ada             as Ada
+import           Prelude                (IO, Semigroup (..), Show (..), String)
+import           Text.Printf            (printf)
+
+-- Define the data for our validator
+data MyCustomDatum = MyCustomDatum
+    { beneficiary :: PubKeyHash
+    , deadline    :: POSIXTime
+    } deriving (Show, Generic, ToJSON, FromJSON)
+
+PlutusTx.makeLift ''MyCustomDatum
+PlutusTx.unstableMakeIsData ''MyCustomDatum
+
+-- Define our validator
+{-# INLINABLE validateSpend #-}
+validateSpend :: MyCustomDatum -> () -> ScriptContext -> Bool
+validateSpend datum () ctx =
+    traceIfFalse "beneficiary's signature missing" signedByBeneficiary &&
+    traceIfFalse "deadline not reached" deadlineReached
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    signedByBeneficiary :: Bool
+    signedByBeneficiary = txSignedBy info $ beneficiary datum
+
+    deadlineReached :: Bool
+    deadlineReached = contains (from $ deadline datum) $ txInfoValidRange info
+
+-- Boilerplate to compile the validator
+data Timely
+instance Scripts.ValidatorTypes Timely where
+    type instance DatumType Timely = MyCustomDatum
+    type instance RedeemerType Timely = ()
+
+timelyValidator :: Scripts.TypedValidator Timely
+timelyValidator = Scripts.mkTypedValidator @Timely
+    $$(PlutusTx.compile [|| validateSpend ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @MyCustomDatum @()
+
+-- Compile the validator to its on-chain representation
+validator :: Validator
+validator = Scripts.validatorScript timelyValidator
+
+-- Get the hash of the validator script
+valHash :: Ledger.ValidatorHash
+valHash = Scripts.validatorHash timelyValidator
+
+-- Get the address of the validator script
+scrAddress :: Ledger.Address
+scrAddress = scriptAddress validator
+
+-- Off-chain code
+data TimelyParams = TimelyParams
+    { tpBeneficiary :: !PubKeyHash
+    , tpDeadline    :: !POSIXTime
+    } deriving (Generic, ToJSON, FromJSON, Show)
+
+type TimelySchema =
+            Endpoint "give" TimelyParams
+        .\/ Endpoint "grab" ()
+
+give :: AsContractError e => TimelyParams -> Contract w s e ()
+give tp = do
+    let datum = MyCustomDatum
+                { beneficiary = tpBeneficiary tp
+                , deadline    = tpDeadline tp
+                }
+        tx  = Constraints.mustPayToOtherScript valHash datum $ Ada.lovelaceValueOf 2000000
+    ledgerTx <- submitTx tx
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+    logInfo @String $ printf "made a gift of 2 Ada to %s with deadline %s"
+        (show $ tpBeneficiary tp) (show $ tpDeadline tp)
+
+grab :: forall w s e. AsContractError e => Contract w s e ()
+grab = do
+    now   <- currentTime
+    pkh   <- ownPubKeyHash
+    utxos <- utxosAt scrAddress
+    let utxos' = Map.filter (isSuitable pkh now) utxos
+    if Map.null utxos'
+        then logInfo @String $ "no gifts available"
+        else do
+            let orefs   = fst <$> Map.toList utxos'
+                lookups = Constraints.unspentOutputs utxos'      <>
+                          Constraints.otherScript validator
+                tx :: TxConstraints Void Void
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs] <>
+                          Constraints.mustValidateIn (from now)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ "collected gifts"
+  where
+    isSuitable :: PubKeyHash -> POSIXTime -> ChainIndexTxOut -> Bool
+    isSuitable pkh now o = case _ciTxOutDatum o of
+        Left _          -> False
+        Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+            Nothing -> False
+            Just d  -> beneficiary d == pkh && deadline d <= now
+
+endpoints :: Contract () TimelySchema Text ()
+endpoints = awaitPromise (give' `select` grab') >> endpoints
+  where
+    give' = endpoint @"give" give
+    grab' = endpoint @"grab" $ const grab
+
+mkSchemaDefinitions ''TimelySchema
+
+mkKnownCurrencies []
+
+
+module CardanoEmulator where
+
+import Control.Monad (void)
+import Data.Default (Default (..))
+import Plutus.Trace.Emulator as Emulator
+import Wallet.Emulator.Wallet
+
+import CardanoValidator
+
+-- Emulator trace
+test :: IO ()
+test = runEmulatorTraceIO $ do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    h2 <- activateContractWallet (knownWallet 2) endpoints
+    callEndpoint @"give" h1 $ TimelyParams
+        { tpBeneficiary = mockWalletPaymentPubKeyHash $ knownWallet 2
+        , tpDeadline    = slotToBeginPOSIXTime def 20
+        }
+    void $ Emulator.waitNSlots 15
+    callEndpoint @"grab" h2 ()
+    void $ Emulator.waitNSlots 2
+
+
+module Main where
+
+import CardanoValidator
+import CardanoEmulator
+
+main :: IO ()
+main = do
+    putStrLn "Running Cardano smart contract emulation..."
+    test
+    putStrLn "Emulation completed."
+
+
+name:                cardano-timely-contract
+version:             0.1.0.0
+build-type:          Simple
+cabal-version:       >=1.10
+
+executable cardano-timely-contract
+  main-is:             Main.hs
+  other-modules:       CardanoValidator
+                     , CardanoEmulator
+  build-depends:       base >=4.14 && <4.15
+                     , aeson
+                     , containers
+                     , data-default
+                     , freer-extras
+                     , playground-common
+                     , plutus-contract
+                     , plutus-ledger
+                     , plutus-ledger-api
+                     , plutus-tx
+                     , plutus-tx-plugin
+                     , text
+  hs-source-dirs:      src
+  default-language:    Haskell2010
+  ghc-options:         -Wall -fobject-code -fno-ignore-interface-pragmas -fno-omit-interface-pragmas -fno-strictness -fno-spec-constr -fno-specialise
+
+
+
+cardano-timely-contract/
+├── src/
+│   ├── CardanoValidator.hs
+│   ├── CardanoEmulator.hs
+│   └── Main.hs
+└── cardano-timely-contract.cabal
+
+
+cabal build
+cabal run
+
+
+name:                cardano-timely-contract
+version:             0.1.0.0
+build-type:          Simple
+cabal-version:       >=1.10
+
+executable cardano-timely-contract
+  main-is:             Main.hs
+  other-modules:       CardanoValidator
+                     , CardanoEmulator
+  build-depends:       base >=4.14 && <4.15
+                     , aeson
+                     , containers
+                     , data-default
+                     , freer-extras
+                     , playground-common
+                     , plutus-contract
+                     , plutus-ledger
+                     , plutus-ledger-api
+                     , plutus-tx
+                     , plutus-tx-plugin
+                     , text
+  hs-source-dirs:      src
+  default-language:    Haskell2010
+  ghc-options:         -Wall -fobject-code -fno-ignore-interface-pragmas -fno-omit-interface-pragmas -fno-strictness -fno-spec-constr -fno-specialise
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoValidator where
+
+import           Control.Monad             hiding (fmap)
+import           Data.Aeson                (FromJSON, ToJSON)
+import           Data.Map                  as Map
+import           Data.Text                 (Text)
+import           Data.Void                 (Void)
+import           GHC.Generics              (Generic)
+import           Plutus.Contract           as Contract
+import           Plutus.Trace.Emulator     as Emulator
+import qualified PlutusTx
+import           PlutusTx.Prelude          hiding (Semigroup(..), unless)
+import           Ledger                    hiding (mint, singleton)
+import           Ledger.Constraints        as Constraints
+import qualified Ledger.Typed.Scripts      as Scripts
+import           Ledger.Ada                as Ada
+import           Ledger.Value              as Value
+import           Prelude                   (IO, Semigroup (..), Show (..), String)
+import           Text.Printf               (printf)
+
+-- Define the data for our validator
+data TimedVault = TimedVault
+    { beneficiary :: !PubKeyHash
+    , deadline    :: !POSIXTime
+    , amount      :: !Integer
+    } deriving (Show, Generic, ToJSON, FromJSON)
+
+PlutusTx.makeLift ''TimedVault
+PlutusTx.unstableMakeIsData ''TimedVault
+
+-- Define our validator
+{-# INLINABLE mkValidator #-}
+mkValidator :: TimedVault -> () -> ScriptContext -> Bool
+mkValidator tv _ ctx =
+    traceIfFalse "beneficiary's signature missing" signedByBeneficiary &&
+    traceIfFalse "deadline not reached" deadlineReached &&
+    traceIfFalse "wrong amount" correctAmount
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    signedByBeneficiary :: Bool
+    signedByBeneficiary = txSignedBy info $ beneficiary tv
+
+    deadlineReached :: Bool
+    deadlineReached = contains (from $ deadline tv) $ txInfoValidRange info
+
+    correctAmount :: Bool
+    correctAmount = (lovelaceValueOf $ amount tv) `leq` valueSpent info
+
+-- Boilerplate to compile the validator
+data Vaulting
+instance Scripts.ValidatorTypes Vaulting where
+    type instance DatumType Vaulting = TimedVault
+    type instance RedeemerType Vaulting = ()
+
+typedValidator :: Scripts.TypedValidator Vaulting
+typedValidator = Scripts.mkTypedValidator @Vaulting
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @TimedVault @()
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+valHash :: Ledger.ValidatorHash
+valHash = Scripts.validatorHash typedValidator
+
+scrAddress :: Ledger.Address
+scrAddress = scriptAddress validator
+
+-- Off-chain code
+data VaultParams = VaultParams
+    { vpBeneficiary :: !PubKeyHash
+    , vpDeadline    :: !POSIXTime
+    , vpAmount      :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, Show)
+
+type VaultSchema =
+            Endpoint "create" VaultParams
+        .\/ Endpoint "collect" ()
+        .\/ Endpoint "extend" POSIXTime
+
+create :: AsContractError e => VaultParams -> Contract w s e ()
+create vp = do
+    let tv = TimedVault
+                { beneficiary = vpBeneficiary vp
+                , deadline    = vpDeadline vp
+                , amount      = vpAmount vp
+                }
+        tx  = Constraints.mustPayToOtherScript valHash (Datum $ PlutusTx.toBuiltinData tv) $ Ada.lovelaceValueOf $ vpAmount vp
+    ledgerTx <- submitTx tx
+    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+    logInfo @String $ printf "created a vault of %d Ada for %s with deadline %s"
+        (vpAmount vp)
+        (show $ vpBeneficiary vp)
+        (show $ vpDeadline vp)
+
+collect :: forall w s e. AsContractError e => Contract w s e ()
+collect = do
+    now   <- currentTime
+    pkh   <- ownPubKeyHash
+    utxos <- utxosAt scrAddress
+    let utxos' = Map.filter (isSuitable pkh now) utxos
+    if Map.null utxos'
+        then logInfo @String $ "no vaults available"
+        else do
+            let orefs   = fst <$> Map.toList utxos'
+                lookups = Constraints.unspentOutputs utxos'      <>
+                          Constraints.otherScript validator
+                tx :: TxConstraints Void Void
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs] <>
+                          Constraints.mustValidateIn (from now)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ "collected funds from vaults"
+  where
+    isSuitable :: PubKeyHash -> POSIXTime -> ChainIndexTxOut -> Bool
+    isSuitable pkh now o = case _ciTxOutDatum o of
+        Left _          -> False
+        Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+            Nothing -> False
+            Just d  -> beneficiary d == pkh && deadline d <= now
+
+extend :: AsContractError e => POSIXTime -> Contract w s e ()
+extend newDeadline = do
+    pkh   <- ownPubKeyHash
+    utxos <- utxosAt scrAddress
+    let utxos' = Map.filter (isOwnVault pkh) utxos
+    if Map.null utxos'
+        then logInfo @String $ "no vaults available"
+        else do
+            let orefs   = fst <$> Map.toList utxos'
+                lookups = Constraints.unspentOutputs utxos'      <>
+                          Constraints.otherScript validator
+                tx :: TxConstraints Void Void
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs] <>
+                          Constraints.mustValidateIn (from $ newDeadline - 1000)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ "extended vault deadline to " ++ show newDeadline
+  where
+    isOwnVault :: PubKeyHash -> ChainIndexTxOut -> Bool
+    isOwnVault pkh o = case _ciTxOutDatum o of
+        Left _          -> False
+        Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+            Nothing -> False
+            Just d  -> beneficiary d == pkh
+
+endpoints :: Contract () VaultSchema Text ()
+endpoints = awaitPromise (create' `select` collect' `select` extend') >> endpoints
+  where
+    create' = endpoint @"create" create
+    collect' = endpoint @"collect" $ const collect
+    extend' = endpoint @"extend" extend
+
+mkSchemaDefinitions ''VaultSchema
+
+mkKnownCurrencies []
+
+
+
+module CardanoTest where
+
+import Control.Monad (void)
+import Data.Default (Default (..))
+import Data.Map as Map
+import Data.Monoid (Last (..))
+import Ledger.TimeSlot
+import Plutus.Contract.Test
+import Plutus.Trace.Emulator as Emulator
+import Test.Tasty
+import Test.Tasty.HUnit
+import Wallet.Emulator.Wallet
+
+import CardanoValidator
+
+tests :: TestTree
+tests = testGroup "Timed Vault"
+    [ checkPredicate "Create vault succeeds"
+        (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+        .&&. walletFundsChange (knownWallet 2) mempty
+        .&&. successfullyFunded (Ada.lovelaceValueOf 10_000_000))
+        createVaultTrace
+
+    , checkPredicate "Collect before deadline fails"
+        (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+        .&&. walletFundsChange (knownWallet 2) mempty)
+        collectEarlyTrace
+
+    , checkPredicate "Collect after deadline succeeds"
+        (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+        .&&. walletFundsChange (knownWallet 2) (Ada.lovelaceValueOf 10_000_000))
+        collectLateTrace
+
+    , checkPredicate "Extend deadline succeeds"
+        (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+        .&&. walletFundsChange (knownWallet 2) mempty)
+        extendDeadlineTrace
+    ]
+
+createVaultTrace :: EmulatorTrace ()
+createVaultTrace = do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    let vaultParams = VaultParams
+            { vpBeneficiary = mockWalletPaymentPubKeyHash $ knownWallet 2
+            , vpDeadline    = slotToBeginPOSIXTime def 20
+            , vpAmount      = 10_000_000
+            }
+    void $ Emulator.waitNSlots 1
+    void $ Emulator.callEndpoint @"create" h1 vaultParams
+
+collectEarlyTrace :: EmulatorTrace ()
+collectEarlyTrace = do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    h2 <- activateContractWallet (knownWallet 2) endpoints
+    let vaultParams = VaultParams
+            { vpBeneficiary = mockWalletPaymentPubKeyHash $ knownWallet 2
+            , vpDeadline    = slotToBeginPOSIXTime def 20
+            , vpAmount      = 10_000_000
+            }
+    void $ Emulator.waitNSlots 1
+    void $ Emulator.callEndpoint @"create" h1 vaultParams
+    void $ Emulator.waitNSlots 10
+    void $ Emulator.callEndpoint @"collect" h2 ()
+
+collectLateTrace :: EmulatorTrace ()
+collectLateTrace = do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    h2 <- activateContractWallet (knownWallet 2) endpoints
+    let vaultParams = VaultParams
+            { vpBeneficiary = mockWalletPaymentPubKeyHash $ knownWallet 2
+            , vpDeadline    = slotToBeginPOSIXTime def 20
+            , vpAmount      = 10_000_000
+            }
+    void $ Emulator.waitNSlots 1
+    void $ Emulator.callEndpoint @"create" h1 vaultParams
+    void $ Emulator.waitNSlots 25
+    void $ Emulator.callEndpoint @"collect" h2 ()
+
+extendDeadlineTrace :: EmulatorTrace ()
+extendDeadlineTrace = do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    let vaultParams = VaultParams
+            { vpBeneficiary = mockWalletPaymentPubKeyHash $ knownWallet 1
+            , vpDeadline    = slotToBeginPOSIXTime def 20
+            , vpAmount      = 10_000_000
+            }
+    void $ Emulator.waitNSlots 1
+    void $ Emulator.callEndpoint @"create" h1 vaultParams
+    void $ Emulator.waitNSlots 10
+    void $ Emulator.callEndpoint @"extend" h1 (slotToBeginPOSIXTime def 40)
+
+main :: IO ()
+main = defaultMain tests
+
+
+
+module CardanoCLI where
+
+import System.Environment (getArgs)
+import Data.String (fromString)
+import Ledger (POSIXTime(..), PubKeyHash(..))
+import CardanoValidator
+
+main :: IO ()
+main = do
+    args <- getArgs
+    case args of
+        ["create", beneficiary, deadline, amount] -> do
+            let params = VaultParams
+                    { vpBeneficiary = PubKeyHash $ fromString beneficiary
+                    , vpDeadline = POSIXTime $ read deadline
+                    , vpAmount = read amount
+                    }
+            putStrLn $ "Creating vault with parameters: " ++ show params
+            -- Here you would call the actual contract function
+            
+        ["collect"] -> do
+            putStrLn "Collecting from available vaults"
+            -- Here you would call the actual contract function
+            
+        ["extend", newDeadline] -> do
+            putStrLn $ "Extending deadline to: " ++ newDeadline
+            -- Here you would call the actual contract function
+            
+        _ -> putStrLn "Usage: cardano-cli [create <beneficiary> <deadline> <amount> | collect | extend <newDeadline>]"
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoValidator where
+
+import           Control.Monad             hiding (fmap)
+import           Data.Aeson                (FromJSON, ToJSON)
+import           Data.Map                  as Map
+import           Data.Text                 (Text)
+import           Data.Void                 (Void)
+import           GHC.Generics              (Generic)
+import           Plutus.Contract           as Contract
+import           Plutus.Trace.Emulator     as Emulator
+import qualified PlutusTx
+import           PlutusTx.Prelude          hiding (Semigroup(..), unless)
+import           Ledger                    hiding (mint, singleton)
+import           Ledger.Constraints        as Constraints
+import qualified Ledger.Typed.Scripts      as Scripts
+import           Ledger.Ada                as Ada
+import           Ledger.Value              as Value
+import           Prelude                   (IO, Semigroup (..), Show (..), String)
+import           Text.Printf               (printf)
+
+-- Define the data for our validator
+data TimedVault = TimedVault
+    { beneficiary :: !PubKeyHash
+    , deadline    :: !POSIXTime
+    , amount      :: !Integer
+    , tokenName   :: !TokenName
+    , tokenAmount :: !Integer
+    } deriving (Show, Generic, ToJSON, FromJSON)
+
+PlutusTx.makeLift ''TimedVault
+PlutusTx.unstableMakeIsData ''TimedVault
+
+-- Define our validator
+{-# INLINABLE mkValidator #-}
+mkValidator :: TimedVault -> () -> ScriptContext -> Bool
+mkValidator tv _ ctx =
+    traceIfFalse "beneficiary's signature missing" signedByBeneficiary &&
+    traceIfFalse "deadline not reached" deadlineReached &&
+    traceIfFalse "wrong amount" correctAmount &&
+    traceIfFalse "wrong token amount" correctTokenAmount
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    signedByBeneficiary :: Bool
+    signedByBeneficiary = txSignedBy info $ beneficiary tv
+
+    deadlineReached :: Bool
+    deadlineReached = contains (from $ deadline tv) $ txInfoValidRange info
+
+    correctAmount :: Bool
+    correctAmount = (lovelaceValueOf $ amount tv) `leq` valuePaidTo info (beneficiary tv)
+
+    correctTokenAmount :: Bool
+    correctTokenAmount = tokenAmount tv `leq` assetClassValueOf (valuePaidTo info (beneficiary tv)) (AssetClass (ownCurrencySymbol ctx, tokenName tv))
+
+-- Minting policy
+{-# INLINABLE mkPolicy #-}
+mkPolicy :: TokenName -> TxOutRef -> () -> ScriptContext -> Bool
+mkPolicy tn utxo _ ctx = traceIfFalse "UTxO not consumed"   hasUTxO           &&
+                         traceIfFalse "wrong amount minted" checkMintedAmount
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    hasUTxO :: Bool
+    hasUTxO = any (\i -> txInInfoOutRef i == utxo) $ txInfoInputs info
+
+    checkMintedAmount :: Bool
+    checkMintedAmount = case flattenValue (txInfoMint info) of
+        [(_, tn', amt)] -> tn' == tn && amt == 1
+        _               -> False
+
+policy :: TokenName -> TxOutRef -> Scripts.MintingPolicy
+policy tn utxo = mkMintingPolicyScript $
+    $$(PlutusTx.compile [|| \tn' utxo' -> Scripts.wrapMintingPolicy $ mkPolicy tn' utxo' ||])
+    `PlutusTx.applyCode`
+    PlutusTx.liftCode tn
+    `PlutusTx.applyCode`
+    PlutusTx.liftCode utxo
+
+-- Boilerplate to compile the validator
+data Vaulting
+instance Scripts.ValidatorTypes Vaulting where
+    type instance DatumType Vaulting = TimedVault
+    type instance RedeemerType Vaulting = ()
+
+typedValidator :: Scripts.TypedValidator Vaulting
+typedValidator = Scripts.mkTypedValidator @Vaulting
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @TimedVault @()
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+valHash :: Ledger.ValidatorHash
+valHash = Scripts.validatorHash typedValidator
+
+scrAddress :: Ledger.Address
+scrAddress = scriptAddress validator
+
+-- Off-chain code
+data VaultParams = VaultParams
+    { vpBeneficiary :: !PubKeyHash
+    , vpDeadline    :: !POSIXTime
+    , vpAmount      :: !Integer
+    , vpTokenName   :: !TokenName
+    , vpTokenAmount :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, Show)
+
+type VaultSchema =
+            Endpoint "create" VaultParams
+        .\/ Endpoint "collect" ()
+        .\/ Endpoint "extend" POSIXTime
+        .\/ Endpoint "mint" TokenName
+
+create :: AsContractError e => VaultParams -> Contract w s e ()
+create vp = do
+    pkh <- ownPubKeyHash
+    utxos <- utxosAt (pubKeyHashAddress pkh)
+    case Map.keys utxos of
+        []       -> logError @String "no utxo found"
+        oref : _ -> do
+            let tv = TimedVault
+                        { beneficiary = vpBeneficiary vp
+                        , deadline    = vpDeadline vp
+                        , amount      = vpAmount vp
+                        , tokenName   = vpTokenName vp
+                        , tokenAmount = vpTokenAmount vp
+                        }
+                val     = Value.singleton (ownCurrencySymbol $ policy (vpTokenName vp) oref) (vpTokenName vp) (vpTokenAmount vp)
+                lookups = Constraints.unspentOutputs utxos                                   <>
+                          Constraints.otherScript validator                                  <>
+                          Constraints.mintingPolicy (policy (vpTokenName vp) oref)
+                tx      = Constraints.mustPayToOtherScript valHash (Datum $ PlutusTx.toBuiltinData tv) (Ada.lovelaceValueOf (vpAmount vp) <> val) <>
+                          Constraints.mustMintValue val                                      <>
+                          Constraints.mustSpendPubKeyOutput oref
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ printf "created a vault of %d Ada and %d tokens for %s with deadline %s"
+                (vpAmount vp)
+                (vpTokenAmount vp)
+                (show $ vpBeneficiary vp)
+                (show $ vpDeadline vp)
+
+collect :: forall w s e. AsContractError e => Contract w s e ()
+collect = do
+    now   <- currentTime
+    pkh   <- ownPubKeyHash
+    utxos <- utxosAt scrAddress
+    let utxos' = Map.filter (isSuitable pkh now) utxos
+    if Map.null utxos'
+        then logInfo @String $ "no vaults available"
+        else do
+            let orefs   = fst <$> Map.toList utxos'
+                lookups = Constraints.unspentOutputs utxos'      <>
+                          Constraints.otherScript validator
+                tx :: TxConstraints Void Void
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs] <>
+                          Constraints.mustValidateIn (from now)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ "collected funds from vaults"
+  where
+    isSuitable :: PubKeyHash -> POSIXTime -> ChainIndexTxOut -> Bool
+    isSuitable pkh now o = case _ciTxOutDatum o of
+        Left _          -> False
+        Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+            Nothing -> False
+            Just d  -> beneficiary d == pkh && deadline d <= now
+
+extend :: AsContractError e => POSIXTime -> Contract w s e ()
+extend newDeadline = do
+    pkh   <- ownPubKeyHash
+    utxos <- utxosAt scrAddress
+    let utxos' = Map.filter (isOwnVault pkh) utxos
+    if Map.null utxos'
+        then logInfo @String $ "no vaults available"
+        else do
+            let orefs   = fst <$> Map.toList utxos'
+                lookups = Constraints.unspentOutputs utxos'      <>
+                          Constraints.otherScript validator
+                tx :: TxConstraints Void Void
+                tx      = mconcat [Constraints.mustSpendScriptOutput oref $ Redeemer $ PlutusTx.toBuiltinData () | oref <- orefs] <>
+                          Constraints.mustValidateIn (from $ newDeadline - 1000)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ "extended vault deadline to " ++ show newDeadline
+  where
+    isOwnVault :: PubKeyHash -> ChainIndexTxOut -> Bool
+    isOwnVault pkh o = case _ciTxOutDatum o of
+        Left _          -> False
+        Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+            Nothing -> False
+            Just d  -> beneficiary d == pkh
+
+mint :: AsContractError e => TokenName -> Contract w s e ()
+mint tn = do
+    pkh <- ownPubKeyHash
+    utxos <- utxosAt (pubKeyHashAddress pkh)
+    case Map.keys utxos of
+        []       -> logError @String "no utxo found"
+        oref : _ -> do
+            let val     = Value.singleton (ownCurrencySymbol $ policy tn oref) tn 1
+                lookups = Constraints.mintingPolicy (policy tn oref) <>
+                          Constraints.unspentOutputs utxos
+                tx      = Constraints.mustMintValue val                <>
+                          Constraints.mustSpendPubKeyOutput oref
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ printf "minted %s" (show val)
+
+endpoints :: Contract () VaultSchema Text ()
+endpoints = awaitPromise (create' `select` collect' `select` extend' `select` mint') >> endpoints
+  where
+    create' = endpoint @"create" create
+    collect' = endpoint @"collect" $ const collect
+    extend' = endpoint @"extend" extend
+    mint' = endpoint @"mint" mint
+
+mkSchemaDefinitions ''VaultSchema
+
+mkKnownCurrencies []
+
+
+{-# LANGUAGE NumericUnderscores  #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
+
+module CardanoTest where
+
+import Control.Monad (void)
+import Data.Default (Default (..))
+import Data.Map as Map
+import Data.Monoid (Last (..))
+import Ledger.TimeSlot
+import Plutus.Contract.Test
+import Plutus.Trace.Emulator as Emulator
+import Test.Tasty
+import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck as QC
+import Wallet.Emulator.Wallet
+
+import CardanoValidator
+
+tests :: TestTree
+tests = testGroup "Timed Vault"
+    [ testGroup "Unit tests"
+        [ checkPredicate "Create vault succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty
+            .&&. successfullyFunded (Ada.lovelaceValueOf 10_000_000))
+            createVaultTrace
+
+        , checkPredicate "Collect before deadline fails"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty)
+            collectEarlyTrace
+
+        , checkPredicate "Collect after deadline succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) (Ada.lovelaceValueOf 10_000_000))
+            collectLateTrace
+
+        , checkPredicate "Extend deadline succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty)
+            extendDeadlineTrace
+
+        , checkPredicate "Mint token succeeds"
+            (walletFundsChange (knownWallet 1) mempty
+            .&&. assertNoFailedTransactions)
+            mintTokenTrace
+        ]
+    , testGroup "Property tests"
+        [ testProperty "Vault creation preserves total balance" prop_createPreservesBalance
+        , testProperty "Cannot collect before deadline" prop_cannotCollectEarly
+        , testProperty "Can always collect after deadline" prop_canAlwaysCollectLate
+        ]
+    ]
+
+createVaultTrace :: EmulatorTrace ()
+createVaultTrace = do
+    h1 <- activateContractWallet (knownWallet 1) endpoints
+    let vaultParams = VaultParams
+            { vpBeneficiary = mockWalletPaymentPubKeyHash $
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveAnyClass      #-}
+{-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoValidator where
+
+import           Control.Monad             hiding (fmap)
+import           Data.Aeson                (FromJSON, ToJSON)
+import           Data.Map                  as Map
+import           Data.Text                 (Text)
+import           Data.Void                 (Void)
+import           GHC.Generics              (Generic)
+import           Plutus.Contract           as Contract
+import           Plutus.Trace.Emulator     as Emulator
+import qualified PlutusTx
+import           PlutusTx.Prelude          hiding (Semigroup(..), unless)
+import           Ledger                    hiding (mint, singleton)
+import           Ledger.Constraints        as Constraints
+import qualified Ledger.Typed.Scripts      as Scripts
+import           Ledger.Ada                as Ada
+import           Ledger.Value              as Value
+import           Prelude                   (IO, Semigroup (..), Show (..), String)
+import           Text.Printf               (printf)
+
+-- Define the data for our validator
+data TimedVault = TimedVault
+    { beneficiary :: !PubKeyHash
+    , deadline    :: !POSIXTime
+    , amount      :: !Integer
+    , tokenName   :: !TokenName
+    , tokenAmount :: !Integer
+    } deriving (Show, Generic, ToJSON, FromJSON)
+
+data DEXPool = DEXPool
+    { token1     :: !AssetClass
+    , token2     :: !AssetClass
+    , liquidity  :: !Integer
+    } deriving (Show, Generic, ToJSON, FromJSON)
+
+data DEXAction = Swap AssetClass AssetClass Integer
+               | AddLiquidity Integer Integer
+               | RemoveLiquidity Integer
+               deriving (Show, Generic, ToJSON, FromJSON)
+
+PlutusTx.makeLift ''TimedVault
+PlutusTx.unstableMakeIsData ''TimedVault
+PlutusTx.makeLift ''DEXPool
+PlutusTx.unstableMakeIsData ''DEXPool
+PlutusTx.makeLift ''DEXAction
+PlutusTx.unstableMakeIsData ''DEXAction
+
+-- Define our validator
+{-# INLINABLE mkValidator #-}
+mkValidator :: TimedVault -> DEXPool -> DEXAction -> ScriptContext -> Bool
+mkValidator tv pool action ctx =
+    case action of
+        Swap t1 t2 amount -> validateSwap tv pool t1 t2 amount ctx
+        AddLiquidity a1 a2 -> validateAddLiquidity tv pool a1 a2 ctx
+        RemoveLiquidity amount -> validateRemoveLiquidity tv pool amount ctx
+
+{-# INLINABLE validateSwap #-}
+validateSwap :: TimedVault -> DEXPool -> AssetClass -> AssetClass -> Integer -> ScriptContext -> Bool
+validateSwap tv pool t1 t2 amount ctx =
+    traceIfFalse "Invalid tokens for swap" validTokens &&
+    traceIfFalse "Insufficient liquidity" sufficientLiquidity &&
+    traceIfFalse "Slippage too high" acceptableSlippage
+  where
+    info = scriptContextTxInfo ctx
+    validTokens = (t1 == token1 pool && t2 == token2 pool) || (t1 == token2 pool && t2 == token1 pool)
+    sufficientLiquidity = assetClassValueOf (valuePaidTo info (ownHash ctx)) t2 >= calculatedOutput
+    calculatedOutput = amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) t2 `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) t1
+    acceptableSlippage = calculatedOutput * 99 `divide` 100 <= assetClassValueOf (valuePaidTo info (ownHash ctx)) t2
+
+{-# INLINABLE validateAddLiquidity #-}
+validateAddLiquidity :: TimedVault -> DEXPool -> Integer -> Integer -> ScriptContext -> Bool
+validateAddLiquidity tv pool amount1 amount2 ctx =
+    traceIfFalse "Incorrect ratio" correctRatio &&
+    traceIfFalse "Insufficient liquidity tokens minted" sufficientLiquidityMinted
+  where
+    info = scriptContextTxInfo ctx
+    correctRatio = amount1 * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool) ==
+                   amount2 * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool)
+    sufficientLiquidityMinted = valueOf (txInfoMint info) (ownCurrencySymbol ctx) (TokenName "LP") >= 
+                                minimum [amount1 * liquidity pool `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool),
+                                         amount2 * liquidity pool `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool)]
+
+{-# INLINABLE validateRemoveLiquidity #-}
+validateRemoveLiquidity :: TimedVault -> DEXPool -> Integer -> ScriptContext -> Bool
+validateRemoveLiquidity tv pool amount ctx =
+    traceIfFalse "Insufficient tokens returned" sufficientTokensReturned
+  where
+    info = scriptContextTxInfo ctx
+    sufficientTokensReturned = 
+        assetClassValueOf (valuePaidTo info (beneficiary tv)) (token1 pool) >= amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool) `divide` liquidity pool &&
+        assetClassValueOf (valuePaidTo info (beneficiary tv)) (token2 pool) >= amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool) `divide` liquidity pool
+
+-- Minting policy for liquidity tokens
+{-# INLINABLE mkLiquidityPolicy #-}
+mkLiquidityPolicy :: TxOutRef -> () -> ScriptContext -> Bool
+mkLiquidityPolicy oref _ ctx = traceIfFalse "UTxO not consumed"   hasUTxO           &&
+                                traceIfFalse "wrong amount minted" checkMintedAmount
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+    hasUTxO :: Bool
+    hasUTxO = any (\i -> txInInfoOutRef i == oref) $ txInfoInputs info
+
+    checkMintedAmount :: Bool
+    checkMintedAmount = case flattenValue (txInfoMint info) of
+        [(_, tn', amt)] -> tn' == TokenName "LP" && amt > 0
+        _               -> False
+
+liquidityPolicy :: TxOutRef -> Scripts.MintingPolicy
+liquidityPolicy oref = mkMintingPolicyScript $
+    $$(PlutusTx.compile [|| \oref' -> Scripts.wrapMintingPolicy $ mkLiquidityPolicy oref' ||])
+    `PlutusTx.applyCode`
+    PlutusTx.liftCode oref
+
+-- Boilerplate to compile the validator
+data Vaulting
+instance Scripts.ValidatorTypes Vaulting where
+    type instance DatumType Vaulting = (TimedVault, DEXPool)
+    type instance RedeemerType Vaulting = DEXAction
+
+typedValidator :: Scripts.TypedValidator Vaulting
+typedValidator = Scripts.mkTypedValidator @Vaulting
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @(TimedVault, DEXPool) @DEXAction
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+valHash :: Ledger.ValidatorHash
+valHash = Scripts.validatorHash typedValidator
+
+scrAddress :: Ledger.Address
+scrAddress = scriptAddress validator
+
+-- Off-chain code
+data VaultParams = VaultParams
+    { vpBeneficiary :: !PubKeyHash
+    , vpDeadline    :: !POSIXTime
+    , vpAmount      :: !Integer
+    , vpTokenName   :: !TokenName
+    , vpTokenAmount :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, Show)
+
+data PoolParams = PoolParams
+    { ppToken1    :: !AssetClass
+    , ppToken2    :: !AssetClass
+    , ppLiquidity :: !Integer
+    } deriving (Generic, ToJSON, FromJSON, Show)
+
+type VaultSchema =
+            Endpoint "create" VaultParams
+        .\/ Endpoint "collect" ()
+        .\/ Endpoint "extend" POSIXTime
+        .\/ Endpoint "createPool" PoolParams
+        .\/ Endpoint "swap" (AssetClass, AssetClass, Integer)
+        .\/ Endpoint "addLiquidity" (Integer, Integer)
+        .\/ Endpoint "removeLiquidity" Integer
+
+create :: AsContractError e => VaultParams -> Contract w s e ()
+create vp = do
+    pkh <- ownPubKeyHash
+    utxos <- utxosAt (pubKeyHashAddress pkh)
+    case Map.keys utxos of
+        []       -> logError @String "no utxo found"
+        oref : _ -> do
+            let tv = TimedVault
+                        { beneficiary = vpBeneficiary vp
+                        , deadline    = vpDeadline vp
+                        , amount      = vpAmount vp
+                        , tokenName   = vpTokenName vp
+                        , tokenAmount = vpTokenAmount vp
+                        }
+                val     = Value.singleton (ownCurrencySymbol $ liquidityPolicy oref) (vpTokenName vp) (vpTokenAmount vp)
+                lookups = Constraints.unspentOutputs utxos                                   <>
+                          Constraints.otherScript validator                                  <>
+                          Constraints.mintingPolicy (liquidityPolicy oref)
+                tx      = Constraints.mustPayToOtherScript valHash (Datum $ PlutusTx.toBuiltinData (tv, DEXPool (AssetClass (adaSymbol, adaToken)) (AssetClass (ownCurrencySymbol $ liquidityPolicy oref, vpTokenName vp)) 0)) (Ada.lovelaceValueOf (vpAmount vp) <> val) <>
+                          Constraints.mustMintValue val                                      <>
+                          Constraints.mustSpendPubKeyOutput oref
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ printf "created a vault of %d Ada and %d tokens for %s with deadline %s"
+                (vpAmount vp)
+                (vpTokenAmount vp)
+                (show $ vpBeneficiary vp)
+                (show $ vpDeadline vp)
+
+-- ... (other off-chain functions like collect, extend, createPool, swap, addLiquidity, removeLiquidity would be implemented here)
+
+endpoints :: Contract () VaultSchema Text ()
+endpoints = awaitPromise (create' `select` collect' `select` extend' `select` createPool' `select` swap' `select` addLiquidity' `select` removeLiquidity') >> endpoints
+  where
+    create' = endpoint @"create" create
+    collect' = endpoint @"collect" $ const collect
+    extend' = endpoint @"extend" extend
+    createPool' = endpoint @"createPool" createPool
+    swap' = endpoint @"swap" (\(t1, t2, amount) -> swap t1 t2 amount)
+    addLiquidity' = endpoint @"addLiquidity" (\(a1, a2) -> addLiquidity a1 a2)
+    removeLiquidity' = endpoint @"removeLiquidity" removeLiquidity
+
+mkSchemaDefinitions ''VaultSchema
+
+mkKnownCurrencies []
+
+
+{-# LANGUAGE NumericUnderscores  #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
+
+module CardanoTest where
+
+import Control.Monad (void)
+import Data.Default (Default (..))
+import Data.Map as Map
+import Data.Monoid (Last (..))
+import Ledger.TimeSlot
+import Plutus.Contract.Test
+import Plutus.Trace.Emulator as Emulator
+import Test.Tasty
+import Test.Tasty.HUnit
+import Test.Tasty.QuickCheck as QC
+import Wallet.Emulator.Wallet
+
+import CardanoValidator
+
+tests :: TestTree
+tests = testGroup "Timed Vault with DEX"
+    [ testGroup "Unit tests"
+        [ checkPredicate "Create vault succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty
+            .&&. successfullyFunded (Ada.lovelaceValueOf 10_000_000))
+            createVaultTrace
+
+        , checkPredicate "Collect before deadline fails"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty)
+            collectEarlyTrace
+
+        , checkPredicate "Collect after deadline succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) (Ada.lovelaceValueOf 10_000_000))
+            collectLateTrace
+
+        , checkPredicate "Extend deadline succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-10_000_000))
+            .&&. walletFundsChange (knownWallet 2) mempty)
+            extendDeadlineTrace
+
+        , checkPredicate "Create pool succeeds"
+            (walletFundsChange (knownWallet 1) (Ada.lovelaceValueOf (-20_000_000))
+            .&&. assertNoFailedTransactions)
+            createPoolTrace
+
+        , checkPredicate "Swap tokens succe
+
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
+
+module CardanoDEXValidator where
+
+import qualified PlutusTx
+import           PlutusTx.Prelude
+import           Plutus.V2.Ledger.Api
+import           Plutus.V2.Ledger.Contexts
+import qualified Plutus.Script.Utils.V2.Typed.Scripts as Scripts
+import           Plutus.Script.Utils.V2.Typed.Scripts.Validators (DatumType, RedeemerType)
+
+-- Define the data for our validator
+data DEXPool = DEXPool
+    { token1     :: AssetClass
+    , token2     :: AssetClass
+    , liquidity  :: Integer
+    }
+PlutusTx.unstableMakeIsData ''DEXPool
+
+data DEXAction = Swap AssetClass AssetClass Integer
+               | AddLiquidity Integer Integer
+               | RemoveLiquidity Integer
+PlutusTx.unstableMakeIsData ''DEXAction
+
+{-# INLINABLE mkValidator #-}
+mkValidator :: DEXPool -> DEXAction -> ScriptContext -> Bool
+mkValidator pool action ctx =
+    case action of
+        Swap t1 t2 amount -> validateSwap pool t1 t2 amount ctx
+        AddLiquidity a1 a2 -> validateAddLiquidity pool a1 a2 ctx
+        RemoveLiquidity amount -> validateRemoveLiquidity pool amount ctx
+
+{-# INLINABLE validateSwap #-}
+validateSwap :: DEXPool -> AssetClass -> AssetClass -> Integer -> ScriptContext -> Bool
+validateSwap pool t1 t2 amount ctx =
+    traceIfFalse "Invalid tokens for swap" validTokens &&
+    traceIfFalse "Insufficient liquidity" sufficientLiquidity &&
+    traceIfFalse "Slippage too high" acceptableSlippage
+  where
+    info = scriptContextTxInfo ctx
+    validTokens = (t1 == token1 pool && t2 == token2 pool) || (t1 == token2 pool && t2 == token1 pool)
+    sufficientLiquidity = assetClassValueOf (valuePaidTo info (ownHash ctx)) t2 >= calculatedOutput
+    calculatedOutput = amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) t2 `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) t1
+    acceptableSlippage = calculatedOutput * 99 `divide` 100 <= assetClassValueOf (valuePaidTo info (ownHash ctx)) t2
+
+{-# INLINABLE validateAddLiquidity #-}
+validateAddLiquidity :: DEXPool -> Integer -> Integer -> ScriptContext -> Bool
+validateAddLiquidity pool amount1 amount2 ctx =
+    traceIfFalse "Incorrect ratio" correctRatio &&
+    traceIfFalse "Insufficient liquidity tokens minted" sufficientLiquidityMinted
+  where
+    info = scriptContextTxInfo ctx
+    correctRatio = amount1 * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool) ==
+                   amount2 * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool)
+    sufficientLiquidityMinted = valueOf (txInfoMint info) (ownCurrencySymbol ctx) "LP" >= 
+                                minimum [amount1 * liquidity pool `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool),
+                                         amount2 * liquidity pool `divide` assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool)]
+
+{-# INLINABLE validateRemoveLiquidity #-}
+validateRemoveLiquidity :: DEXPool -> Integer -> ScriptContext -> Bool
+validateRemoveLiquidity pool amount ctx =
+    traceIfFalse "Insufficient tokens returned" sufficientTokensReturned
+  where
+    info = scriptContextTxInfo ctx
+    sufficientTokensReturned = 
+        assetClassValueOf (valuePaidTo info (txOutAddress $ head $ getContinuingOutputs ctx)) (token1 pool) >= amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token1 pool) `divide` liquidity pool &&
+        assetClassValueOf (valuePaidTo info (txOutAddress $ head $ getContinuingOutputs ctx)) (token2 pool) >= amount * assetClassValueOf (valueLockedBy info (ownHash ctx)) (token2 pool) `divide` liquidity pool
+
+data Swapping
+instance Scripts.ValidatorTypes Swapping where
+    type DatumType Swapping = DEXPool
+    type RedeemerType Swapping = DEXAction
+
+typedValidator :: Scripts.TypedValidator Swapping
+typedValidator = Scripts.mkTypedValidator @Swapping
+    $$(PlutusTx.compile [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @DEXPool @DEXAction
+
+validator :: Validator
+validator = Scripts.validatorScript typedValidator
+
+valHash :: ValidatorHash
+valHash = Scripts.validatorHash typedValidator
+
+scrAddress :: Address
+scrAddress = scriptHashAddress valHash
+
+
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE NoImplicitPrelude   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+
+module CardanoDEXOffChain where
+
+import           Control.Monad             (void)
+import           Data.Map                  as Map
+import           Data.Text                 (Text)
+import           Plutus.Contract           as Contract
+import qualified PlutusTx
+import           PlutusTx.Prelude          hiding (Semigroup(..), unless)
+import           Ledger                    hiding (mint, singleton)
+import           Ledger.Constraints        as Constraints
+import qualified Ledger.Typed.Scripts      as Scripts
+import           Prelude                   (String, show)
+import           Text.Printf               (printf)
+
+import CardanoDEXValidator
+
+-- Off-chain code
+data PoolParams = PoolParams
+    { ppToken1    :: AssetClass
+    , ppToken2    :: AssetClass
+    , ppLiquidity :: Integer
+    } deriving Show
+
+type DEXSchema =
+            Endpoint "createPool" PoolParams
+        .\/ Endpoint "swap" (AssetClass, AssetClass, Integer)
+        .\/ Endpoint "addLiquidity" (Integer, Integer)
+        .\/ Endpoint "removeLiquidity" Integer
+
+createPool :: AsContractError e => PoolParams -> Contract w s e ()
+createPool pp = do
+    pkh <- ownPubKeyHash
+    utxos <- utxosAt (pubKeyHashAddress pkh)
+    case Map.keys utxos of
+        []       -> logError @String "no utxo found"
+        oref : _ -> do
+            let pool = DEXPool
+                        { token1 = ppToken1 pp
+                        , token2 = ppToken2 pp
+                        , liquidity = ppLiquidity pp
+                        }
+                lookups = Constraints.unspentOutputs utxos <>
+                          Constraints.otherScript validator
+                tx      = Constraints.mustPayToOtherScript valHash (Datum $ PlutusTx.toBuiltinData pool) (Ada.lovelaceValueOf 2_000_000)
+            ledgerTx <- submitTxConstraintsWith @Void lookups tx
+            void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+            logInfo @String $ printf "created a pool with %s and %s tokens"
+                (show $ ppToken1 pp)
+                (show $ ppToken2 pp)
+
+swap :: AsContractError e => AssetClass -> AssetClass -> Integer -> Contract w s e ()
+swap t1 t2 amount = do
+    utxos <- utxosAt scrAddress
+    case Map.toList utxos of
+        [] -> logError @String "no pool found"
+        (oref, o) : _ -> case _ciTxOutDatum o of
+            Left _          -> logError @String "datum not found"
+            Right (Datum e) -> case PlutusTx.fromBuiltinData e of
+                Nothing -> logError @String "datum has wrong type"
+                Just pool -> do
+                    let lookups = Constraints.unspentOutputs utxos <>
+                                  Constraints.otherScript validator
+                        tx      = Constraints.mustSpendScriptOutput oref (Redeemer $ PlutusTx.toBuiltinData $ Swap t1 t2 amount) <>
+                                  Constraints.mustPayToOtherScript valHash (Datum $ PlutusTx.toBuiltinData pool) (Ada.lovelaceValueOf 2_000_000)
+                    ledgerTx <- submitTxConstraintsWith @Void lookups tx
+                    void $ awaitTxConfirmed $ getCardanoTxId ledgerTx
+                    logInfo @String $ printf "swapped %d of %s to %s"
+                        amount
+                        (show t1)
+                        (show t2)
+
+-- ... (implement addLiquidity and removeLiquidity similarly)
+
+endpoints :: Contract () DEXSchema Text ()
+endpoints = awaitPromise (createPool' `select` swap' `select` addLiquidity' `select` removeLiquidity') >> endpoints
+  where
+    createPool' = endpoint @"createPool" createPool
+    swap' = endpoint @"swap" $ \(t1, t2, amount) -> swap t1 t2 amount
+    addLiquidity' = endpoint @"addLiquidity" $ \(a1, a2) -> addLiquidity a1 a2
+    removeLiquidity' = endpoint @"removeLiquidity" removeLiquidity
+
+-- ... (implement addLiquidity and removeLiquidity)
+
+
+
+
+
+
+
+
+
+------------------------ begin hers.  
+9.  17. 2.58.  PERPLEXITY CHAINLINK CARDANO
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
